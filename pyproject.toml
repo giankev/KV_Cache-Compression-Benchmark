@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "l2kv"
+version = "0.1.0"
+description = "L2-norm KV cache compression experiments for HuggingFace causal LMs."
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "pandas",
+    "numpy",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
