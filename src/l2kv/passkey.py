@@ -10,7 +10,11 @@ import pandas as pd
 import torch
 
 from .cache_compression import CompressionStrategy, compress_cache
-from .cache_metrics import kv_cache_size_mb, theoretical_kv_cache_size_mb
+from .cache_metrics import (
+    cache_layer_lengths,
+    kv_cache_size_mb,
+    theoretical_kv_cache_size_mb,
+)
 
 PromptKind = Literal["standard", "distractor"]
 
@@ -80,7 +84,7 @@ def make_distractor_passkey_prompt(
         f"Only {pass_key} is the pass key.\n\n"
     )
 
-    question = "What is the true pass key? Answer only the pass key:"
+    question = "What is the true pass key? The true pass key is"
 
     distractor_templates = [
         "The ticket number is {num}. ",
@@ -146,13 +150,62 @@ def extract_first_number(text: str) -> str:
     return match.group(0)
 
 
+def _eos_token_ids(model: Any, tokenizer: Any) -> set[int]:
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is None:
+        eos_token_id = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+
+    if eos_token_id is None:
+        return set()
+
+    if isinstance(eos_token_id, int):
+        return {eos_token_id}
+
+    return {int(token_id) for token_id in eos_token_id}
+
+
+def _decode_generated_tokens(
+    tokenizer: Any,
+    generated: Sequence[torch.Tensor],
+) -> tuple[torch.Tensor, list[int], list[str], str, str]:
+    if not generated:
+        empty = torch.empty((1, 0), dtype=torch.long)
+        return empty, [], [], "", ""
+
+    generated_ids_tensor = torch.cat(list(generated), dim=-1)
+    generated_ids = generated_ids_tensor[0].detach().cpu().tolist()
+    generated_tokens = tokenizer.convert_ids_to_tokens(generated_ids)
+    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    generated_text_raw = tokenizer.decode(generated_ids, skip_special_tokens=False)
+
+    return (
+        generated_ids_tensor,
+        generated_ids,
+        generated_tokens,
+        generated_text,
+        generated_text_raw,
+    )
+
+
+def is_correct_prediction(
+    prediction: str,
+    answer: str,
+    evaluation_mode: str = "strict_context",
+) -> bool:
+    if evaluation_mode != "strict_context":
+        raise ValueError(f"Unknown evaluation_mode: {evaluation_mode}")
+
+    return prediction == answer
+
+
 @torch.no_grad()
 def generate_passkey_answer(
     model: Any,
     tokenizer: Any,
     context: str,
     question: str,
-    max_new_tokens: int = 8,
+    max_new_tokens: int = 12,
+    expected_digits: int | None = None,
     use_compression: bool = False,
     keep_ratio: float = 0.6,
     prune_after: int = 1024,
@@ -231,6 +284,9 @@ def generate_passkey_answer(
         cache = out.past_key_values
         logical_pos += chunk_len
 
+    cache_mb_before_compression = kv_cache_size_mb(cache)
+    cache_lens_before_compression = cache_layer_lengths(cache)
+
     if use_compression:
         cache = compress_cache(
             cache,
@@ -239,6 +295,9 @@ def generate_passkey_answer(
             strategy=strategy,
             skip_layers=skip_layers,
         )
+
+    cache_mb_after_compression = kv_cache_size_mb(cache)
+    cache_lens_after_compression = cache_layer_lengths(cache)
 
     q_len = question_ids.shape[1]
     past_len = cache.layers[0].keys.shape[2]
@@ -275,7 +334,8 @@ def generate_passkey_answer(
 
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
-    generated = []
+    generated: list[torch.Tensor] = []
+    eos_token_ids = _eos_token_ids(model, tokenizer)
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -284,6 +344,22 @@ def generate_passkey_answer(
 
     for step in range(max_new_tokens):
         generated.append(next_token)
+
+        (
+            _,
+            _,
+            _,
+            decoded_text,
+            _,
+        ) = _decode_generated_tokens(tokenizer, generated)
+        prediction = extract_first_number(decoded_text)
+        token_id = int(next_token[0, -1].detach().cpu().item())
+
+        if token_id in eos_token_ids:
+            break
+
+        if expected_digits is not None and len(prediction) >= expected_digits:
+            break
 
         if step == max_new_tokens - 1:
             break
@@ -321,11 +397,17 @@ def generate_passkey_answer(
 
     decode_time = time.perf_counter() - t0
 
-    generated_ids = torch.cat(generated, dim=-1)
-    generated_text = tokenizer.decode(
-        generated_ids[0],
-        skip_special_tokens=True,
+    (
+        _,
+        generated_ids,
+        generated_tokens,
+        generated_text,
+        generated_text_raw,
+    ) = _decode_generated_tokens(
+        tokenizer,
+        generated,
     )
+    prediction = extract_first_number(generated_text)
 
     final_cache_mb = kv_cache_size_mb(cache)
 
@@ -341,16 +423,24 @@ def generate_passkey_answer(
 
     return {
         "generated_text": generated_text,
+        "generated_text_raw": generated_text_raw,
+        "generated_ids": generated_ids,
+        "generated_tokens": generated_tokens,
+        "prediction": prediction,
         "context_tokens": context_ids.shape[1],
         "question_tokens": question_ids.shape[1],
         "total_prompt_tokens": context_ids.shape[1] + question_ids.shape[1],
         "prefill_time": prefill_time,
         "decode_time": decode_time,
-        "decode_tok_s": max_new_tokens / max(decode_time, 1e-8),
+        "decode_tok_s": len(generated_ids) / max(decode_time, 1e-8),
         "final_cache_len": cache.layers[0].keys.shape[2],
         "final_cache_mb": final_cache_mb,
         "uncompressed_cache_mb": uncompressed_cache_mb,
         "memory_saved_percent": memory_saved_percent,
+        "cache_mb_before_compression": cache_mb_before_compression,
+        "cache_mb_after_compression": cache_mb_after_compression,
+        "cache_lens_before_compression": cache_lens_before_compression,
+        "cache_lens_after_compression": cache_lens_after_compression,
     }
 
 
@@ -362,11 +452,13 @@ def run_passkey_benchmark(
     depths: Sequence[float],
     seeds: Sequence[int],
     prompt_kind: PromptKind = "standard",
-    max_new_tokens: int = 8,
+    max_new_tokens: int = 12,
     prune_after: int = 1024,
     chunk_size: int = 512,
     strategy: CompressionStrategy = "low_l2",
-    passkey_digits: int = 8,
+    passkey_digits: int = 5,
+    expected_digits: int | None = None,
+    evaluation_mode: str = "strict_context",
     output_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """Run the passkey benchmark loop from the notebook."""
@@ -402,6 +494,12 @@ def run_passkey_benchmark(
 
                     cfg_strategy = cfg.get("strategy", strategy)
                     cfg_prune_after = cfg.get("prune_after", prune_after)
+                    if "expected_digits" in cfg:
+                        cfg_expected_digits = cfg["expected_digits"]
+                    elif expected_digits is not None:
+                        cfg_expected_digits = expected_digits
+                    else:
+                        cfg_expected_digits = len(answer)
 
                     res = generate_passkey_answer(
                         model,
@@ -409,6 +507,7 @@ def run_passkey_benchmark(
                         context,
                         question,
                         max_new_tokens=cfg.get("max_new_tokens", max_new_tokens),
+                        expected_digits=cfg_expected_digits,
                         use_compression=cfg["use_compression"],
                         keep_ratio=cfg["keep_ratio"],
                         prune_after=cfg_prune_after,
@@ -418,11 +517,12 @@ def run_passkey_benchmark(
                     )
 
                     generated = res["generated_text"].strip()
-                    prediction = extract_first_number(generated)
-                    if prompt_kind == "distractor":
-                        correct = prediction == answer
-                    else:
-                        correct = generated.startswith(answer)
+                    prediction = res["prediction"]
+                    correct = is_correct_prediction(
+                        prediction=prediction,
+                        answer=answer,
+                        evaluation_mode=evaluation_mode,
+                    )
 
                     row = {
                         "config": cfg["config"],
@@ -431,15 +531,33 @@ def run_passkey_benchmark(
                         "seed": seed,
                         "answer": answer,
                         "generated": generated,
+                        "generated_text_raw": res["generated_text_raw"],
+                        "generated_ids": res["generated_ids"],
+                        "generated_tokens": res["generated_tokens"],
+                        "prediction": prediction,
                         "correct": correct,
                         "keep_ratio": cfg["keep_ratio"],
                         "compression_ratio": 1 - cfg["keep_ratio"],
                         "strategy": cfg_strategy,
                         "skip_layers": tuple(cfg["skip_layers"]),
                         "prune_after": cfg_prune_after,
+                        "expected_digits": cfg_expected_digits,
+                        "evaluation_mode": evaluation_mode,
                         "final_cache_mb": res["final_cache_mb"],
                         "uncompressed_cache_mb": res["uncompressed_cache_mb"],
                         "memory_saved_percent": res["memory_saved_percent"],
+                        "cache_mb_before_compression": res[
+                            "cache_mb_before_compression"
+                        ],
+                        "cache_mb_after_compression": res[
+                            "cache_mb_after_compression"
+                        ],
+                        "cache_lens_before_compression": res[
+                            "cache_lens_before_compression"
+                        ],
+                        "cache_lens_after_compression": res[
+                            "cache_lens_after_compression"
+                        ],
                         "context_tokens": res["context_tokens"],
                         "question_tokens": res["question_tokens"],
                         "total_prompt_tokens": res["total_prompt_tokens"],
@@ -448,9 +566,6 @@ def run_passkey_benchmark(
                         "decode_tok_s": res["decode_tok_s"],
                         "final_cache_len": res["final_cache_len"],
                     }
-
-                    if prompt_kind == "distractor":
-                        row["prediction"] = prediction
 
                     rows.append(row)
 

@@ -17,7 +17,7 @@ CONFIG = {
     "context_lengths": [32768],
     "depths": [0.1, 0.5, 0.9],
     "seeds": [0],
-    "max_new_tokens": 8,
+    "max_new_tokens": 12,
     "prune_after": 1024,
     "chunk_size": 512,
     "strategy": "low_l2",
