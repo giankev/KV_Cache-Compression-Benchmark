@@ -22,7 +22,6 @@ def compress_cache(
       layer.keys:   [B, H_kv, T, D]
       layer.values: [B, H_kv, T, D]
 
-    This preserves the notebook behavior:
       - low_l2 keeps the lowest key L2 scores.
       - high_l2 keeps the highest key L2 scores.
       - random keeps a random subset.

@@ -1,29 +1,48 @@
-﻿# KV Cache Compression Benchmark
+# KV Cache Compression Benchmark
 
-Refactor of the Kaggle notebook experiments for L2-norm based KV cache
-compression on Qwen2.5-3B-Instruct.
+Minimal L2-norm KV-cache compression benchmark for Qwen2.5-3B-Instruct.
+
+The main benchmark path is intentionally small:
+
+- standard passkey task only
+- context lengths: `8192`, `32768`
+- depth: `0.5`
+- seed: `0`
+- configs: `no_compression`, `low_l2_keep50`, `low_l2_keep10`
+- compressed configs use `get_default_skip_layers()`
 
 ## Kaggle Usage
 
 ```bash
 pip install -e .
-
-python scripts/debug_passkey.py --task distractor --context-len 8192 --depth 0.5 --passkey-digits 5 --config no_compression
-
-python scripts/run_light_passkey_benchmark.py --task standard --context-lengths 8192 32768 --configs light_standard
-
-python scripts/run_light_passkey_benchmark.py --task distractor --context-lengths 8192 --passkey-digits 5 --configs light_standard
+python scripts/run_basic_passkey.py
 ```
 
-The lightweight benchmark scripts keep their settings in simple argparse
-arguments and save CSV outputs under `results/` by default.
+The benchmark prints raw and summary dataframes, then saves:
+
+- `results/basic_passkey_raw.csv`
+- `results/basic_passkey_summary.csv`
+
+To save an attention/L2 heatmap:
+
+```bash
+python scripts/show_attention_l2.py
+```
+
+This writes `results/attention_l2_heatmap.png`. Add `--show` to display it.
+
+`src/l2kv/alr.py` and `scripts/run_alr_scan.py` are kept for exploratory ALR
+work, but they are not part of the main benchmark path.
 
 ## Structure
 
+- `scripts/run_basic_passkey.py` - the main benchmark.
+- `scripts/show_attention_l2.py` - attention/L2 visualization helper.
+- `scripts/run_alr_scan.py` - optional ALR scan.
 - `src/l2kv/cache_compression.py` - in-place DynamicCache compression.
 - `src/l2kv/cache_metrics.py` - actual and theoretical KV cache sizes.
-- `src/l2kv/model_utils.py` - model/tokenizer loading helpers.
-- `src/l2kv/passkey.py` - passkey prompt generation and benchmark loop.
-- `src/l2kv/alr.py` - ALR scan and skip-layer suggestions.
+- `src/l2kv/configs.py` - the three basic benchmark configs.
+- `src/l2kv/model_utils.py` - model/tokenizer loading.
+- `src/l2kv/passkey.py` - standard passkey prompt and strict-context generation.
 - `src/l2kv/attention_viz.py` - attention/L2 and ALR heatmaps.
-- `scripts/` - runnable experiment entry points.
+- `src/l2kv/alr.py` - ALR scan and skip-layer suggestions.

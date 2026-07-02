@@ -2,21 +2,12 @@ from __future__ import annotations
 
 import random
 import re
-import time
-from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Sequence
 
-import pandas as pd
 import torch
 
 from .cache_compression import CompressionStrategy, compress_cache
-from .cache_metrics import (
-    cache_layer_lengths,
-    kv_cache_size_mb,
-    theoretical_kv_cache_size_mb,
-)
-
-PromptKind = Literal["standard", "distractor"]
+from .cache_metrics import kv_cache_size_mb, theoretical_kv_cache_size_mb
 
 
 def make_passkey_prompt(
@@ -25,122 +16,38 @@ def make_passkey_prompt(
     seed: int = 0,
     depth: float = 0.5,
 ) -> tuple[str, str, str]:
-    random.seed(seed)
+    """Build the standard passkey retrieval prompt."""
 
-    pass_key = str(random.randint(10000, 99999))
+    random.seed(seed)
+    answer = str(random.randint(10000, 99999))
 
     intro = (
         "There is an important information hidden inside a lot of irrelevant text. "
         "Find it and remember it. I will ask you about it at the end.\n\n"
     )
-
-    needle = f"The pass key is {pass_key}. Remember it. {pass_key} is the pass key.\n\n"
+    needle = f"The pass key is {answer}. Remember it. {answer} is the pass key.\n\n"
     question = "What is the pass key? The pass key is"
 
-    garbage_sentence = (
+    filler_sentence = (
         "The grass is green. The sky is blue. The sun is yellow. "
         "Here we go. There and back again. "
     )
 
     fixed_text = intro + needle + question
     fixed_tokens = len(tokenizer(fixed_text, add_special_tokens=False).input_ids)
+    filler_budget = max(0, target_tokens - fixed_tokens)
 
-    garbage_budget = max(0, target_tokens - fixed_tokens)
-
-    garbage_text = garbage_sentence * ((garbage_budget // 20) + 100)
-    garbage_ids = tokenizer(garbage_text, add_special_tokens=False).input_ids[
-        :garbage_budget
+    filler_text = filler_sentence * ((filler_budget // 20) + 100)
+    filler_ids = tokenizer(filler_text, add_special_tokens=False).input_ids[
+        :filler_budget
     ]
 
-    split = int(len(garbage_ids) * depth)
-
-    prefix = tokenizer.decode(garbage_ids[:split], skip_special_tokens=True)
-    suffix = tokenizer.decode(garbage_ids[split:], skip_special_tokens=True)
-
+    split = int(len(filler_ids) * depth)
+    prefix = tokenizer.decode(filler_ids[:split], skip_special_tokens=True)
+    suffix = tokenizer.decode(filler_ids[split:], skip_special_tokens=True)
     context = intro + prefix + "\n\n" + needle + suffix + "\n\n"
 
-    return context, question, pass_key
-
-
-def make_distractor_passkey_prompt(
-    tokenizer: Any,
-    target_tokens: int = 8192,
-    seed: int = 0,
-    depth: float = 0.5,
-    passkey_digits: int = 5,
-) -> tuple[str, str, str]:
-    random.seed(seed)
-
-    pass_key = "".join(str(random.randint(0, 9)) for _ in range(passkey_digits))
-
-    intro = (
-        "There is one important pass key hidden inside a long document. "
-        "Many other numbers are irrelevant distractors. "
-        "Find the true pass key and remember it.\n\n"
-    )
-
-    needle = (
-        f"IMPORTANT INFORMATION: the true pass key is {pass_key}. "
-        f"Only {pass_key} is the pass key.\n\n"
-    )
-
-    question = "What is the true pass key? The true pass key is"
-
-    distractor_templates = [
-        "The ticket number is {num}. ",
-        "The reference code is {num}. ",
-        "The room number is {num}. ",
-        "The invoice ID is {num}. ",
-        "The archive label is {num}. ",
-        "The temporary access code is {num}. ",
-        "The user identifier is {num}. ",
-        "The checkpoint number is {num}. ",
-    ]
-
-    def random_number() -> str:
-        while True:
-            num = "".join(str(random.randint(0, 9)) for _ in range(passkey_digits))
-            if num != pass_key:
-                return num
-
-    garbage_parts: list[str] = []
-
-    while True:
-        template = random.choice(distractor_templates)
-        num = random_number()
-        garbage_parts.append(template.format(num=num))
-
-        garbage_text = "".join(garbage_parts)
-        fixed_text = intro + needle + question
-
-        total_tokens = len(
-            tokenizer(
-                fixed_text + garbage_text,
-                add_special_tokens=False,
-            ).input_ids
-        )
-
-        if total_tokens >= target_tokens:
-            break
-
-    fixed_text = intro + needle + question
-    fixed_tokens = len(tokenizer(fixed_text, add_special_tokens=False).input_ids)
-
-    garbage_budget = max(0, target_tokens - fixed_tokens)
-
-    garbage_ids = tokenizer(
-        "".join(garbage_parts),
-        add_special_tokens=False,
-    ).input_ids[:garbage_budget]
-
-    split = int(len(garbage_ids) * depth)
-
-    prefix = tokenizer.decode(garbage_ids[:split], skip_special_tokens=True)
-    suffix = tokenizer.decode(garbage_ids[split:], skip_special_tokens=True)
-
-    context = intro + prefix + "\n\n" + needle + suffix + "\n\n"
-
-    return context, question, pass_key
+    return context, question, answer
 
 
 def extract_first_number(text: str) -> str:
@@ -150,10 +57,15 @@ def extract_first_number(text: str) -> str:
     return match.group(0)
 
 
+def is_correct_prediction(prediction: str, answer: str) -> bool:
+    return prediction == answer
+
+
 def _eos_token_ids(model: Any, tokenizer: Any) -> set[int]:
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     if eos_token_id is None:
-        eos_token_id = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+        generation_config = getattr(model, "generation_config", None)
+        eos_token_id = getattr(generation_config, "eos_token_id", None)
 
     if eos_token_id is None:
         return set()
@@ -164,38 +76,15 @@ def _eos_token_ids(model: Any, tokenizer: Any) -> set[int]:
     return {int(token_id) for token_id in eos_token_id}
 
 
-def _decode_generated_tokens(
+def _decode_generated_text(
     tokenizer: Any,
     generated: Sequence[torch.Tensor],
-) -> tuple[torch.Tensor, list[int], list[str], str, str]:
+) -> str:
     if not generated:
-        empty = torch.empty((1, 0), dtype=torch.long)
-        return empty, [], [], "", ""
+        return ""
 
-    generated_ids_tensor = torch.cat(list(generated), dim=-1)
-    generated_ids = generated_ids_tensor[0].detach().cpu().tolist()
-    generated_tokens = tokenizer.convert_ids_to_tokens(generated_ids)
-    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    generated_text_raw = tokenizer.decode(generated_ids, skip_special_tokens=False)
-
-    return (
-        generated_ids_tensor,
-        generated_ids,
-        generated_tokens,
-        generated_text,
-        generated_text_raw,
-    )
-
-
-def is_correct_prediction(
-    prediction: str,
-    answer: str,
-    evaluation_mode: str = "strict_context",
-) -> bool:
-    if evaluation_mode != "strict_context":
-        raise ValueError(f"Unknown evaluation_mode: {evaluation_mode}")
-
-    return prediction == answer
+    generated_ids = torch.cat(list(generated), dim=-1)[0].detach().cpu().tolist()
+    return tokenizer.decode(generated_ids, skip_special_tokens=True)
 
 
 @torch.no_grad()
@@ -213,6 +102,15 @@ def generate_passkey_answer(
     strategy: CompressionStrategy = "low_l2",
     skip_layers: Sequence[int] = (),
 ) -> dict[str, Any]:
+    """Run strict-context passkey generation.
+
+    The order is:
+    1. prefill the context,
+    2. compress the context KV cache once,
+    3. process the question with the compressed cache,
+    4. decode the answer manually.
+    """
+
     device = next(model.parameters()).device
 
     context_inputs = tokenizer(context, return_tensors="pt").to(device)
@@ -224,19 +122,10 @@ def generate_passkey_answer(
 
     context_ids = context_inputs["input_ids"]
     question_ids = question_inputs["input_ids"]
-
     batch_size = context_ids.shape[0]
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()
-
-    t0 = time.perf_counter()
 
     cache = None
     logical_pos = 0
-    out = None
 
     for start in range(0, context_ids.shape[1], chunk_size):
         chunk = context_ids[:, start : start + chunk_size]
@@ -248,30 +137,25 @@ def generate_passkey_answer(
                 device=device,
                 dtype=torch.long,
             )
-
             out = model(
                 input_ids=chunk,
                 attention_mask=attention_mask,
                 use_cache=True,
                 return_dict=True,
             )
-
         else:
             past_len = cache.layers[0].keys.shape[2]
-
             attention_mask = torch.ones(
                 (batch_size, past_len + chunk_len),
                 device=device,
                 dtype=torch.long,
             )
-
             cache_position = torch.arange(
                 logical_pos,
                 logical_pos + chunk_len,
                 device=device,
                 dtype=torch.long,
             )
-
             out = model(
                 input_ids=chunk,
                 attention_mask=attention_mask,
@@ -284,9 +168,6 @@ def generate_passkey_answer(
         cache = out.past_key_values
         logical_pos += chunk_len
 
-    cache_mb_before_compression = kv_cache_size_mb(cache)
-    cache_lens_before_compression = cache_layer_lengths(cache)
-
     if use_compression:
         cache = compress_cache(
             cache,
@@ -296,25 +177,19 @@ def generate_passkey_answer(
             skip_layers=skip_layers,
         )
 
-    cache_mb_after_compression = kv_cache_size_mb(cache)
-    cache_lens_after_compression = cache_layer_lengths(cache)
-
     q_len = question_ids.shape[1]
     past_len = cache.layers[0].keys.shape[2]
-
     attention_mask = torch.ones(
         (batch_size, past_len + q_len),
         device=device,
         dtype=torch.long,
     )
-
     cache_position = torch.arange(
         logical_pos,
         logical_pos + q_len,
         device=device,
         dtype=torch.long,
     )
-
     out = model(
         input_ids=question_ids,
         attention_mask=attention_mask,
@@ -326,33 +201,15 @@ def generate_passkey_answer(
 
     cache = out.past_key_values
     logical_pos += q_len
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    prefill_time = time.perf_counter() - t0
-
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
     generated: list[torch.Tensor] = []
     eos_token_ids = _eos_token_ids(model, tokenizer)
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    t0 = time.perf_counter()
-
     for step in range(max_new_tokens):
         generated.append(next_token)
-
-        (
-            _,
-            _,
-            _,
-            decoded_text,
-            _,
-        ) = _decode_generated_tokens(tokenizer, generated)
-        prediction = extract_first_number(decoded_text)
+        generated_text = _decode_generated_text(tokenizer, generated)
+        prediction = extract_first_number(generated_text)
         token_id = int(next_token[0, -1].detach().cpu().item())
 
         if token_id in eos_token_ids:
@@ -365,19 +222,16 @@ def generate_passkey_answer(
             break
 
         past_len = cache.layers[0].keys.shape[2]
-
         attention_mask_step = torch.ones(
             (batch_size, past_len + 1),
             device=device,
             dtype=torch.long,
         )
-
         cache_position = torch.tensor(
             [logical_pos],
             device=device,
             dtype=torch.long,
         )
-
         out = model(
             input_ids=next_token,
             attention_mask=attention_mask_step,
@@ -389,191 +243,24 @@ def generate_passkey_answer(
 
         cache = out.past_key_values
         logical_pos += 1
-
         next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    decode_time = time.perf_counter() - t0
-
-    (
-        _,
-        generated_ids,
-        generated_tokens,
-        generated_text,
-        generated_text_raw,
-    ) = _decode_generated_tokens(
-        tokenizer,
-        generated,
-    )
+    generated_text = _decode_generated_text(tokenizer, generated)
     prediction = extract_first_number(generated_text)
-
-    final_cache_mb = kv_cache_size_mb(cache)
-
+    compressed_cache_mb = kv_cache_size_mb(cache)
     uncompressed_cache_mb = theoretical_kv_cache_size_mb(
         model=model,
         seq_len=logical_pos,
         batch_size=batch_size,
     )
-
     memory_saved_percent = 100 * (
-        1 - final_cache_mb / (uncompressed_cache_mb + 1e-8)
+        1 - compressed_cache_mb / (uncompressed_cache_mb + 1e-8)
     )
 
     return {
         "generated_text": generated_text,
-        "generated_text_raw": generated_text_raw,
-        "generated_ids": generated_ids,
-        "generated_tokens": generated_tokens,
         "prediction": prediction,
-        "context_tokens": context_ids.shape[1],
-        "question_tokens": question_ids.shape[1],
-        "total_prompt_tokens": context_ids.shape[1] + question_ids.shape[1],
-        "prefill_time": prefill_time,
-        "decode_time": decode_time,
-        "decode_tok_s": len(generated_ids) / max(decode_time, 1e-8),
-        "final_cache_len": cache.layers[0].keys.shape[2],
-        "final_cache_mb": final_cache_mb,
+        "compressed_cache_mb": compressed_cache_mb,
         "uncompressed_cache_mb": uncompressed_cache_mb,
         "memory_saved_percent": memory_saved_percent,
-        "cache_mb_before_compression": cache_mb_before_compression,
-        "cache_mb_after_compression": cache_mb_after_compression,
-        "cache_lens_before_compression": cache_lens_before_compression,
-        "cache_lens_after_compression": cache_lens_after_compression,
     }
-
-
-def run_passkey_benchmark(
-    model: Any,
-    tokenizer: Any,
-    eval_configs: Sequence[Mapping[str, Any]],
-    context_lengths: Sequence[int],
-    depths: Sequence[float],
-    seeds: Sequence[int],
-    prompt_kind: PromptKind = "standard",
-    max_new_tokens: int = 12,
-    prune_after: int = 1024,
-    chunk_size: int = 512,
-    strategy: CompressionStrategy = "low_l2",
-    passkey_digits: int = 5,
-    expected_digits: int | None = None,
-    evaluation_mode: str = "strict_context",
-    output_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """Run the passkey benchmark loop from the notebook."""
-
-    rows: list[dict[str, Any]] = []
-
-    for context_len in context_lengths:
-        for depth in depths:
-            for seed in seeds:
-                if prompt_kind == "standard":
-                    context, question, answer = make_passkey_prompt(
-                        tokenizer,
-                        target_tokens=context_len,
-                        seed=seed,
-                        depth=depth,
-                    )
-                elif prompt_kind == "distractor":
-                    context, question, answer = make_distractor_passkey_prompt(
-                        tokenizer,
-                        target_tokens=context_len,
-                        seed=seed,
-                        depth=depth,
-                        passkey_digits=passkey_digits,
-                    )
-                else:
-                    raise ValueError(f"Unknown prompt_kind: {prompt_kind}")
-
-                for cfg in eval_configs:
-                    print(
-                        f"{cfg['config']} | "
-                        f"context={context_len} | depth={depth} | seed={seed}"
-                    )
-
-                    cfg_strategy = cfg.get("strategy", strategy)
-                    cfg_prune_after = cfg.get("prune_after", prune_after)
-                    if "expected_digits" in cfg:
-                        cfg_expected_digits = cfg["expected_digits"]
-                    elif expected_digits is not None:
-                        cfg_expected_digits = expected_digits
-                    else:
-                        cfg_expected_digits = len(answer)
-
-                    res = generate_passkey_answer(
-                        model,
-                        tokenizer,
-                        context,
-                        question,
-                        max_new_tokens=cfg.get("max_new_tokens", max_new_tokens),
-                        expected_digits=cfg_expected_digits,
-                        use_compression=cfg["use_compression"],
-                        keep_ratio=cfg["keep_ratio"],
-                        prune_after=cfg_prune_after,
-                        chunk_size=cfg.get("chunk_size", chunk_size),
-                        strategy=cfg_strategy,
-                        skip_layers=cfg["skip_layers"],
-                    )
-
-                    generated = res["generated_text"].strip()
-                    prediction = res["prediction"]
-                    correct = is_correct_prediction(
-                        prediction=prediction,
-                        answer=answer,
-                        evaluation_mode=evaluation_mode,
-                    )
-
-                    row = {
-                        "config": cfg["config"],
-                        "context_len": context_len,
-                        "depth": depth,
-                        "seed": seed,
-                        "answer": answer,
-                        "generated": generated,
-                        "generated_text_raw": res["generated_text_raw"],
-                        "generated_ids": res["generated_ids"],
-                        "generated_tokens": res["generated_tokens"],
-                        "prediction": prediction,
-                        "correct": correct,
-                        "keep_ratio": cfg["keep_ratio"],
-                        "compression_ratio": 1 - cfg["keep_ratio"],
-                        "strategy": cfg_strategy,
-                        "skip_layers": tuple(cfg["skip_layers"]),
-                        "prune_after": cfg_prune_after,
-                        "expected_digits": cfg_expected_digits,
-                        "evaluation_mode": evaluation_mode,
-                        "final_cache_mb": res["final_cache_mb"],
-                        "uncompressed_cache_mb": res["uncompressed_cache_mb"],
-                        "memory_saved_percent": res["memory_saved_percent"],
-                        "cache_mb_before_compression": res[
-                            "cache_mb_before_compression"
-                        ],
-                        "cache_mb_after_compression": res[
-                            "cache_mb_after_compression"
-                        ],
-                        "cache_lens_before_compression": res[
-                            "cache_lens_before_compression"
-                        ],
-                        "cache_lens_after_compression": res[
-                            "cache_lens_after_compression"
-                        ],
-                        "context_tokens": res["context_tokens"],
-                        "question_tokens": res["question_tokens"],
-                        "total_prompt_tokens": res["total_prompt_tokens"],
-                        "prefill_time": res["prefill_time"],
-                        "decode_time": res["decode_time"],
-                        "decode_tok_s": res["decode_tok_s"],
-                        "final_cache_len": res["final_cache_len"],
-                    }
-
-                    rows.append(row)
-
-    df = pd.DataFrame(rows)
-
-    if output_csv is not None:
-        output_path = Path(output_csv)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(output_path, index=False)
-
-    return df

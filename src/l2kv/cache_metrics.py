@@ -5,9 +5,6 @@ from typing import Any
 
 def get_cache_layer(cache: Any, layer_idx: int) -> tuple[Any, Any]:
     """Return key/value tensors for a DynamicCache layer.
-
-    DynamicCache stores layer objects under cache.layers. The tuple/list fallback
-    mirrors the notebook helper and is useful for older Transformers outputs.
     """
 
     if hasattr(cache, "layers"):
