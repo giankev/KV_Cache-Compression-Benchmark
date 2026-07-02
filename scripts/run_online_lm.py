@@ -20,7 +20,7 @@ from l2kv.model_utils import load_model_and_tokenizer
 
 
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-NUM_TOKENS = 8192
+NUM_TOKENS = 2048
 PRUNE_AFTER = 1024
 
 DATASET_NAME = "wikitext"
