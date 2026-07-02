@@ -23,6 +23,14 @@ The benchmark prints raw and summary dataframes, then saves:
 - `results/basic_passkey_raw.csv`
 - `results/basic_passkey_summary.csv`
 
+For the token-by-token WikiText online LM evaluation:
+
+```bash
+python scripts/run_online_lm.py
+```
+
+This writes `results/online_lm_summary.csv`.
+
 To save an attention/L2 heatmap:
 
 ```bash
@@ -37,7 +45,9 @@ work, but they are not part of the main benchmark path.
 ## Structure
 
 - `scripts/run_basic_passkey.py` - the main benchmark.
+- `scripts/run_online_lm.py` - token-by-token WikiText online LM benchmark.
 - `scripts/show_attention_l2.py` - attention/L2 visualization helper.
+- `scripts/show_alr_heatmap.py` - layer/head ALR heatmap helper.
 - `scripts/run_alr_scan.py` - optional ALR scan.
 - `src/l2kv/cache_compression.py` - in-place DynamicCache compression.
 - `src/l2kv/cache_metrics.py` - actual and theoretical KV cache sizes.
