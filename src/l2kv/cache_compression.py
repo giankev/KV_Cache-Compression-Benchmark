@@ -71,3 +71,55 @@ def compress_cache(
         layer.values = torch.gather(V, dim=2, index=gather_idx).contiguous()
 
     return cache
+
+
+@torch.no_grad()
+def compress_cache_to_budget(
+    cache: Any,
+    max_cache_tokens: int,
+    strategy: CompressionStrategy = "low_l2",
+    skip_layers: Sequence[int] = (),
+) -> Any:
+    """Compress each non-skipped cache layer to a fixed token budget."""
+
+    skipped = set(skip_layers)
+
+    for layer_idx, layer in enumerate(cache.layers):
+        if layer_idx in skipped:
+            continue
+
+        K = layer.keys
+        V = layer.values
+
+        B, H_kv, T, D = K.shape
+
+        if T <= max_cache_tokens:
+            continue
+
+        if strategy == "low_l2":
+            scores = K.float().square().sum(dim=-1)
+            largest = False
+        elif strategy == "high_l2":
+            scores = K.float().square().sum(dim=-1)
+            largest = True
+        elif strategy == "random":
+            scores = torch.rand(B, H_kv, T, device=K.device)
+            largest = False
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+
+        keep_idx = torch.topk(
+            scores,
+            k=max_cache_tokens,
+            dim=-1,
+            largest=largest,
+            sorted=False,
+        ).indices
+
+        keep_idx = keep_idx.sort(dim=-1).values
+        gather_idx = keep_idx.unsqueeze(-1).expand(-1, -1, -1, D)
+
+        layer.keys = torch.gather(K, dim=2, index=gather_idx).contiguous()
+        layer.values = torch.gather(V, dim=2, index=gather_idx).contiguous()
+
+    return cache
