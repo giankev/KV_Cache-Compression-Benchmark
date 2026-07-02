@@ -96,8 +96,13 @@ def evaluate_config(
             "cache_position": torch.tensor([t], device=device, dtype=torch.long),
         }
 
+        if past_key_values is None:
+            past_len = 0
+        else:
+            past_len = past_key_values.layers[0].keys.shape[2]
+
         model_kwargs["attention_mask"] = torch.ones(
-            (1, t + 1),
+            (1, past_len + 1),
             device=device,
             dtype=torch.long,
         )

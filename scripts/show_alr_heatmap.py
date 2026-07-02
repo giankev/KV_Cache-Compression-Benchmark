@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -28,7 +29,15 @@ TEXTS = [
 ]
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Save a layer/head ALR heatmap.")
+    parser.add_argument("--show", action="store_true")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
     results_dir = PROJECT_ROOT / "results"
     results_dir.mkdir(exist_ok=True)
 
@@ -52,7 +61,7 @@ def main() -> None:
     plot_alr_heatmap(
         alr_df,
         save_path=heatmap_path,
-        show=False,
+        show=args.show,
     )
 
     print(f"Saved {alr_path}")
