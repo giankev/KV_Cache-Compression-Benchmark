@@ -82,6 +82,22 @@ The default passkey outputs are:
 - `results/basic_passkey_raw.csv`;
 - `results/basic_passkey_summary.csv`.
 
+## Generate the passkey heatmap
+
+Generate an accuracy-by-depth heatmap from the raw passkey CSV, which contains
+the `depth_target` column:
+
+```python
+!python scripts/plot_passkey_heatmap.py \
+  --input-csv results/passkey_3b_32k_depths_raw.csv \
+  --output results/passkey_3b_32k_depths_heatmap.png \
+  --title "Passkey retrieval accuracy by depth — Qwen2.5-3B, 32k context"
+```
+
+The script prints the aggregated accuracy table before saving the PNG. If more
+than one seed is present, each cell contains the mean accuracy for that
+configuration and depth.
+
 ## Online language modeling and ALR
 
 `scripts/run_online_lm.py` evaluates WikiText token by token with a fixed cache
