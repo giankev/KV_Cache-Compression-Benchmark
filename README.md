@@ -1,8 +1,8 @@
 # KV Cache Compression Benchmark
 
-Small, script-first benchmark for L2-norm KV-cache compression with Hugging
-Face `DynamicCache`. The main model is `Qwen/Qwen2.5-3B-Instruct`; layers 0 and
-1 remain uncompressed.
+Small, script-first benchmark for L2-norm and SnapKV KV-cache compression with
+Hugging Face `DynamicCache`. The main model is `Qwen/Qwen2.5-3B-Instruct`;
+layers 0 and 1 remain uncompressed.
 
 The implementation follows the core observation of
 [`alessiodevoto/l2compress`](https://github.com/alessiodevoto/l2compress):
@@ -98,6 +98,61 @@ The script prints the aggregated accuracy table before saving the PNG. If more
 than one seed is present, each cell contains the mean accuracy for that
 configuration and depth.
 
+## SnapKV key-value retrieval benchmark
+
+SnapKV uses attention from a final observation window to select important
+prefix positions independently for each native KV head. The implementation is
+compatible with Qwen2.5 Grouped-Query Attention: votes from query heads that
+share a KV head are aggregated without permanently replicating the cache. See
+`docs/SNAPKV_NOTES.md` for the algorithm, fair-capacity convention, and
+limitations.
+
+Run the unit tests and the focused 0.5B SnapKV smoke test on Kaggle:
+
+```python
+!python -m pytest -q
+!python scripts/smoke_test_snapkv_qwen.py
+```
+
+Run the reduced benchmark across all seven configurations:
+
+```python
+!python scripts/run_kv_retrieval.py \
+  --model-name Qwen/Qwen2.5-0.5B-Instruct \
+  --context-lengths 256 \
+  --depths 0.5 \
+  --seeds 0 \
+  --observation-window-size 16 \
+  --pooling-kernel-size 5 \
+  --output-prefix kv_retrieval_reduced
+```
+
+Run the 3B, 32k benchmark at three target depths:
+
+```python
+!python scripts/run_kv_retrieval.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
+  --context-lengths 32000 \
+  --depths 0.25 0.50 0.75 \
+  --seeds 0 \
+  --observation-window-size 64 \
+  --pooling-kernel-size 5 \
+  --output-prefix kv_retrieval_3b_32k
+```
+
+The raw output includes `config`, `depth_target`, and `correct`, so the same
+heatmap script used for the passkey benchmark can visualize it:
+
+```python
+!python scripts/plot_passkey_heatmap.py \
+  --input-csv results/kv_retrieval_3b_32k_raw.csv \
+  --output results/kv_retrieval_3b_32k_heatmap.png \
+  --title "Key-value retrieval accuracy by depth - Qwen2.5-3B, 32k context"
+```
+
+The 3B command is intended for Kaggle or another suitable GPU environment, not
+for a local CPU run.
+
 ## Online language modeling and ALR
 
 `scripts/run_online_lm.py` evaluates WikiText token by token with a fixed cache
@@ -128,6 +183,7 @@ path is checked by `scripts/smoke_test_qwen.py`.
 ```bash
 python -m pytest -q
 python scripts/smoke_test_qwen.py
+python scripts/smoke_test_snapkv_qwen.py
 ```
 
 Unit tests use a synthetic DynamicCache-compatible object and do not download a
@@ -137,10 +193,15 @@ model. The smoke test downloads `Qwen/Qwen2.5-0.5B-Instruct`.
 
 - `src/l2kv/cache_compression.py` - validated in-place cache compression.
 - `src/l2kv/passkey.py` - exact-token prompt construction and greedy decoding.
+- `src/l2kv/snapkv.py` - observation-window voting and GQA-aware compression.
+- `src/l2kv/kv_retrieval.py` - exact-token synthetic key-value prompts.
 - `src/l2kv/position_utils.py` - shared logical-position helpers.
 - `src/l2kv/cache_metrics.py` - actual and theoretical cache sizes.
 - `src/l2kv/alr.py` - exploratory ALR calculation.
 - `scripts/run_basic_passkey.py` - main passkey benchmark.
+- `scripts/run_kv_retrieval.py` - SnapKV and baseline retrieval benchmark.
 - `scripts/run_online_lm.py` - online WikiText benchmark.
 - `scripts/smoke_test_qwen.py` - heterogeneous-layer forward smoke test.
+- `scripts/smoke_test_snapkv_qwen.py` - GQA SnapKV integration smoke test.
 - `docs/IMPLEMENTATION_NOTES.md` - concise implementation/exam notes.
+- `docs/SNAPKV_NOTES.md` - paper summary, adaptations, and limitations.
