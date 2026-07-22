@@ -153,6 +153,68 @@ heatmap script used for the passkey benchmark can visualize it:
 The 3B command is intended for Kaggle or another suitable GPU environment, not
 for a local CPU run.
 
+## SnapKV ablation
+
+`scripts/run_snapkv_ablation.py` runs only SnapKV and an optional uncompressed
+baseline on the same exact key-value retrieval prompts. The default grid has
+`1 * 3 * 1 * 3 * 1 * 1 = 9` SnapKV runs plus three baseline runs. It refuses to
+load the model when the total exceeds `--max-runs`.
+
+Run the focused unit tests:
+
+```bash
+python -m pytest -q \
+  tests/test_snapkv_ablation.py \
+  tests/test_plot_snapkv_ablation.py
+```
+
+Run a quick two-run check with the 0.5B model:
+
+```bash
+python scripts/run_snapkv_ablation.py \
+  --model-name Qwen/Qwen2.5-0.5B-Instruct \
+  --context-lengths 256 \
+  --depths 0.5 \
+  --seeds 0 \
+  --observation-window-sizes 16 \
+  --keep-ratios 0.5 \
+  --pooling-kernel-sizes 5 \
+  --max-new-tokens 12 \
+  --max-runs 2 \
+  --output-prefix snapkv_ablation_quick
+```
+
+Use this reduced 3B command as a sanity check before the full study:
+
+```bash
+python scripts/run_snapkv_ablation.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
+  --context-lengths 4096 \
+  --depths 0.5 \
+  --seeds 0 \
+  --observation-window-sizes 16 \
+  --keep-ratios 0.1 \
+  --pooling-kernel-sizes 5 \
+  --max-runs 2 \
+  --output-prefix snapkv_ablation_3b_sanity
+```
+
+The complete default 3B/32k ablation performs 12 runs:
+
+```bash
+python scripts/run_snapkv_ablation.py \
+  --output-prefix snapkv_ablation_3b_32k
+```
+
+Generate its observation-window-by-depth heatmap from the raw CSV:
+
+```bash
+python scripts/plot_snapkv_ablation.py \
+  --input-csv results/snapkv_ablation_3b_32k_raw.csv \
+  --output results/snapkv_ablation_3b_32k_heatmap.png \
+  --title "SnapKV retrieval accuracy by observation window and depth"
+```
+
 ## Online language modeling and ALR
 
 `scripts/run_online_lm.py` evaluates WikiText token by token with a fixed cache
@@ -195,11 +257,14 @@ model. The smoke test downloads `Qwen/Qwen2.5-0.5B-Instruct`.
 - `src/l2kv/passkey.py` - exact-token prompt construction and greedy decoding.
 - `src/l2kv/snapkv.py` - observation-window voting and GQA-aware compression.
 - `src/l2kv/kv_retrieval.py` - exact-token synthetic key-value prompts.
+- `src/l2kv/kv_retrieval_eval.py` - shared retrieval prefill/decode utilities.
 - `src/l2kv/position_utils.py` - shared logical-position helpers.
 - `src/l2kv/cache_metrics.py` - actual and theoretical cache sizes.
 - `src/l2kv/alr.py` - exploratory ALR calculation.
 - `scripts/run_basic_passkey.py` - main passkey benchmark.
 - `scripts/run_kv_retrieval.py` - SnapKV and baseline retrieval benchmark.
+- `scripts/run_snapkv_ablation.py` - controlled SnapKV-only ablation grid.
+- `scripts/plot_snapkv_ablation.py` - dedicated ablation heatmap.
 - `scripts/run_online_lm.py` - online WikiText benchmark.
 - `scripts/smoke_test_qwen.py` - heterogeneous-layer forward smoke test.
 - `scripts/smoke_test_snapkv_qwen.py` - GQA SnapKV integration smoke test.

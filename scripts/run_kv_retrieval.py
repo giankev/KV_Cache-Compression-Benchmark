@@ -17,19 +17,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from l2kv.cache_compression import compress_cache_to_budget
-from l2kv.cache_metrics import cache_layer_lengths, kv_cache_size_mb
-from l2kv.kv_retrieval import (
-    extract_first_five_digit_number,
-    make_kv_retrieval_prompt,
+from l2kv.cache_metrics import kv_cache_size_mb
+from l2kv.kv_retrieval import make_kv_retrieval_prompt
+from l2kv.kv_retrieval_eval import (
+    assert_cache_capacity as _assert_cache_capacity,
+    cuda_devices as _cuda_devices,
+    generate_greedy as _generate_greedy,
+    prefill_plain as _prefill_plain,
+    prefill_snapkv as _prefill_snapkv,
+    synchronize_cuda_devices as _synchronize,
+    target_capacity as _target_capacity,
 )
 from l2kv.model_utils import load_model_and_tokenizer
-from l2kv.position_utils import make_cache_position, make_position_ids
 from l2kv.runtime_metadata import (
     make_run_metadata,
     print_run_metadata,
     save_run_metadata,
 )
-from l2kv.snapkv import compress_snapkv_cache, prefill_and_score_snapkv
+from l2kv.snapkv import compress_snapkv_cache
 
 
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
@@ -144,14 +149,6 @@ class BenchmarkSettings:
     output_prefix: str
 
 
-@dataclass(frozen=True)
-class _PrefillState:
-    cache: Any
-    last_logits: torch.Tensor
-    logical_position: int
-    scores_by_layer: Sequence[torch.Tensor | None] | None = None
-
-
 def _validate_settings(settings: BenchmarkSettings) -> None:
     if not settings.context_lengths or any(
         length < 1 for length in settings.context_lengths
@@ -196,203 +193,6 @@ def _validate_settings(settings: BenchmarkSettings) -> None:
                 f"window: floor(0.1 * {context_length})={smallest_capacity} < "
                 f"{settings.observation_window_size}"
             )
-
-
-def _cuda_devices(model: Any) -> tuple[torch.device, ...]:
-    devices = {
-        parameter.device
-        for parameter in model.parameters()
-        if parameter.device.type == "cuda"
-    }
-    return tuple(sorted(devices, key=str))
-
-
-def _synchronize(devices: Sequence[torch.device]) -> None:
-    for device in devices:
-        torch.cuda.synchronize(device)
-
-
-def _prefill_plain(
-    model: Any,
-    prompt_ids: Sequence[int],
-    chunk_size: int,
-) -> _PrefillState:
-    device = next(model.parameters()).device
-    input_ids = torch.as_tensor(
-        prompt_ids,
-        dtype=torch.long,
-        device=device,
-    ).unsqueeze(0)
-    if input_ids.shape[1] < 1:
-        raise ValueError("prompt_ids must be non-empty")
-
-    cache = None
-    logical_position = 0
-    last_logits: torch.Tensor | None = None
-    for start in range(0, input_ids.shape[1], chunk_size):
-        chunk = input_ids[:, start : start + chunk_size]
-        position_ids = make_position_ids(
-            logical_position,
-            int(chunk.shape[1]),
-            device,
-        )
-        outputs = model(
-            input_ids=chunk,
-            past_key_values=cache,
-            position_ids=position_ids,
-            cache_position=make_cache_position(position_ids),
-            use_cache=True,
-            output_attentions=False,
-            return_dict=True,
-            logits_to_keep=1,
-        )
-        cache = outputs.past_key_values
-        logical_position += int(chunk.shape[1])
-        last_logits = outputs.logits[:, -1, :].detach().clone()
-        del outputs
-
-    if cache is None or last_logits is None:
-        raise AssertionError("Prompt prefill did not run")
-    return _PrefillState(
-        cache=cache,
-        last_logits=last_logits,
-        logical_position=logical_position,
-    )
-
-
-def _prefill_snapkv(
-    model: Any,
-    prompt_ids: Sequence[int],
-    settings: BenchmarkSettings,
-) -> _PrefillState:
-    result = prefill_and_score_snapkv(
-        model=model,
-        prompt_ids=prompt_ids,
-        observation_window_size=settings.observation_window_size,
-        chunk_size=settings.chunk_size,
-        skip_layers=settings.skip_layers,
-    )
-    return _PrefillState(
-        cache=result.cache,
-        last_logits=result.last_logits,
-        logical_position=result.logical_position,
-        scores_by_layer=result.scores_by_layer,
-    )
-
-
-def _eos_token_ids(model: Any, tokenizer: Any) -> set[int]:
-    eos_token_id = getattr(tokenizer, "eos_token_id", None)
-    if eos_token_id is None:
-        eos_token_id = getattr(
-            getattr(model, "generation_config", None),
-            "eos_token_id",
-            None,
-        )
-    if eos_token_id is None:
-        return set()
-    if isinstance(eos_token_id, int):
-        return {eos_token_id}
-    return {int(token_id) for token_id in eos_token_id}
-
-
-def _decode_generated(
-    tokenizer: Any,
-    generated: Sequence[torch.Tensor],
-) -> str:
-    if not generated:
-        return ""
-    token_ids = torch.cat(list(generated), dim=-1)[0].detach().cpu().tolist()
-    return tokenizer.decode(token_ids, skip_special_tokens=True)
-
-
-def _generate_greedy(
-    model: Any,
-    tokenizer: Any,
-    cache: Any,
-    last_logits: torch.Tensor,
-    logical_position: int,
-    max_new_tokens: int,
-) -> tuple[str, str, Any]:
-    if last_logits.ndim == 3:
-        last_logits = last_logits[:, -1, :]
-    if last_logits.ndim != 2 or last_logits.shape[0] != 1:
-        raise ValueError("last_logits must have shape [1, vocabulary]")
-
-    input_device = next(model.parameters()).device
-    next_token = last_logits.argmax(dim=-1, keepdim=True).to(input_device)
-    eos_token_ids = _eos_token_ids(model, tokenizer)
-    generated: list[torch.Tensor] = []
-
-    for step in range(max_new_tokens):
-        generated.append(next_token)
-        generated_text = _decode_generated(tokenizer, generated)
-        prediction = extract_first_five_digit_number(generated_text)
-        token_id = int(next_token[0, 0].detach().cpu().item())
-
-        if token_id in eos_token_ids or prediction or step == max_new_tokens - 1:
-            break
-
-        position_ids = make_position_ids(
-            logical_position,
-            1,
-            next_token.device,
-        )
-        outputs = model(
-            input_ids=next_token,
-            past_key_values=cache,
-            position_ids=position_ids,
-            cache_position=make_cache_position(position_ids),
-            use_cache=True,
-            output_attentions=False,
-            return_dict=True,
-            logits_to_keep=1,
-        )
-        cache = outputs.past_key_values
-        logical_position += 1
-        next_token = outputs.logits[:, -1, :].argmax(
-            dim=-1,
-            keepdim=True,
-        ).to(input_device)
-        del outputs
-
-    generated_text = _decode_generated(tokenizer, generated)
-    return (
-        generated_text,
-        extract_first_five_digit_number(generated_text),
-        cache,
-    )
-
-
-def _target_capacity(prompt_length: int, keep_ratio: float) -> int:
-    return math.floor(prompt_length * keep_ratio)
-
-
-def _assert_cache_capacity(
-    cache: Any,
-    prompt_length: int,
-    target_capacity: int,
-    skip_layers: Sequence[int],
-    compressed: bool,
-) -> tuple[int, ...]:
-    lengths = tuple(cache_layer_lengths(cache))
-    if not lengths:
-        raise AssertionError("The model returned an empty cache")
-    invalid_skips = sorted(set(skip_layers) - set(range(len(lengths))))
-    if invalid_skips:
-        raise ValueError(f"skip layer indices do not exist: {invalid_skips}")
-
-    skipped = set(skip_layers)
-    for layer_idx, length in enumerate(lengths):
-        expected = (
-            prompt_length
-            if not compressed or layer_idx in skipped
-            else target_capacity
-        )
-        if length != expected:
-            raise AssertionError(
-                f"Layer {layer_idx} has {length} cache tokens, expected {expected}"
-            )
-    return lengths
 
 
 def summarize(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -471,7 +271,9 @@ def run_benchmark(
                         prefill = _prefill_snapkv(
                             model,
                             prompt.prompt_ids,
-                            settings,
+                            settings.observation_window_size,
+                            settings.chunk_size,
+                            settings.skip_layers,
                         )
                     else:
                         prefill = _prefill_plain(
