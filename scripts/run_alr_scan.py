@@ -13,13 +13,21 @@ from l2kv.alr import (
     summarize_alr_by_layer,
     suggest_skip_layers_from_alr,
 )
+from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
+from l2kv.runtime_metadata import (
+    make_run_metadata,
+    print_run_metadata,
+    save_run_metadata,
+)
 
 
 CONFIG = {
     "model_name": "Qwen/Qwen2.5-3B-Instruct",
     "dtype": "auto",
     "device_map": "auto",
+    "attention_implementation": "eager",
+    "seed": 0,
     "max_tokens": 128,
     "normalize_attention": True,
     "debug_shapes": False,
@@ -49,7 +57,38 @@ def main() -> None:
         CONFIG["model_name"],
         dtype=CONFIG["dtype"],
         device_map=CONFIG["device_map"],
+        attn_implementation=CONFIG["attention_implementation"],
     )
+
+    metadata = make_run_metadata(
+        script=Path(__file__).name,
+        model_name=CONFIG["model_name"],
+        model=model,
+        requested_dtype=CONFIG["dtype"],
+        attention_implementation=CONFIG["attention_implementation"],
+        seed=CONFIG["seed"],
+        lengths=[CONFIG["max_tokens"]],
+        depths=None,
+        configurations=[
+            {
+                "name": "alr_decode_scan",
+                "normalize_attention": CONFIG["normalize_attention"],
+                "debug_shapes": CONFIG["debug_shapes"],
+                "top_k": CONFIG["top_k"],
+                "always_include_first_two": CONFIG[
+                    "always_include_first_two"
+                ],
+            }
+        ],
+        skip_layers=get_default_skip_layers(),
+        extra={
+            "device_map_requested": CONFIG["device_map"],
+            "num_texts": len(TEXTS),
+        },
+    )
+    metadata_path = results_dir / "run_metadata.json"
+    print_run_metadata(metadata)
+    save_run_metadata(metadata_path, metadata)
 
     alr_df = scan_alr_qwen_decode_step(
         model=model,
@@ -79,6 +118,7 @@ def main() -> None:
     print(f"Saved {results_dir / 'alr_scan.csv'}")
     print(f"Saved {results_dir / 'alr_layer_summary.csv'}")
     print(f"Saved {results_dir / 'alr_suggested_skip_layers.csv'}")
+    print(f"Saved {metadata_path}")
     print(f"Suggested skip layers: {skip_layers}")
 
 

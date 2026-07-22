@@ -17,6 +17,12 @@ from l2kv.cache_compression import compress_cache_to_budget
 from l2kv.cache_metrics import kv_cache_size_mb, theoretical_kv_cache_size_mb
 from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
+from l2kv.position_utils import make_cache_position, make_position_ids
+from l2kv.runtime_metadata import (
+    make_run_metadata,
+    print_run_metadata,
+    save_run_metadata,
+)
 
 
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
@@ -27,6 +33,9 @@ DATASET_NAME = "wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
 DATASET_SPLIT = "train"
 PROGRESS_EVERY = 512
+SEED = 0
+DTYPE = "auto"
+ATTN_IMPLEMENTATION = "eager"
 
 ONLINE_LM_CONFIGS = [
     {
@@ -56,9 +65,10 @@ COLUMNS = [
     "num_tokens",
     "next_token_accuracy",
     "perplexity",
-    "final_cache_mb",
-    "mean_cache_mb",
-    "uncompressed_cache_mb",
+    "actual_final_cache_mb",
+    "actual_mean_cache_mb",
+    "baseline_final_cache_mb",
+    "baseline_mean_cache_mb",
     "memory_saved_percent_final",
     "memory_saved_percent_mean",
 ]
@@ -95,6 +105,7 @@ def evaluate_config(
     model: Any,
     token_ids: torch.Tensor,
     config: dict[str, Any],
+    seed: int = SEED,
 ) -> dict[str, Any]:
     config_name = config["config"]
     skip_layers = get_default_skip_layers()
@@ -105,6 +116,12 @@ def evaluate_config(
     total_loss = 0.0
     correct = 0
     cache_mb_history: list[float] = []
+    baseline_cache_mb_history: list[float] = []
+    logical_position = 0
+    random_generator = None
+    if config["use_compression"] and config["strategy"] == "random":
+        random_generator = torch.Generator(device=device)
+        random_generator.manual_seed(seed)
 
     for t in range(NUM_TOKENS):
         if t > 0 and t % PROGRESS_EVERY == 0:
@@ -112,24 +129,21 @@ def evaluate_config(
 
         input_ids = token_ids[:, t : t + 1]
         label = token_ids[:, t + 1]
-
-        if past_key_values is None:
-            past_len = 0
-        else:
-            past_len = past_key_values.layers[0].keys.shape[2]
+        position_ids = make_position_ids(
+            start_position=logical_position,
+            length=input_ids.shape[1],
+            device=device,
+        )
 
         outputs = model(
             input_ids=input_ids,
-            attention_mask=torch.ones(
-                (1, past_len + 1),
-                device=device,
-                dtype=torch.long,
-            ),
             past_key_values=past_key_values,
-            cache_position=torch.tensor([t], device=device, dtype=torch.long),
+            position_ids=position_ids,
+            cache_position=make_cache_position(position_ids),
             use_cache=True,
             return_dict=True,
         )
+        logical_position += input_ids.shape[1]
 
         logits = outputs.logits[:, -1, :]
         loss = F.cross_entropy(logits.float(), label)
@@ -145,35 +159,47 @@ def evaluate_config(
                 max_cache_tokens=MAX_CACHE_TOKENS,
                 strategy=config["strategy"],
                 skip_layers=skip_layers,
+                generator=random_generator,
             )
 
         cache_mb_history.append(kv_cache_size_mb(past_key_values))
+        baseline_cache_mb_history.append(
+            theoretical_kv_cache_size_mb(
+                model=model,
+                seq_len=logical_position,
+                batch_size=1,
+            )
+        )
 
     print(f"{config_name}: processed {NUM_TOKENS}/{NUM_TOKENS}")
 
     mean_loss = total_loss / NUM_TOKENS
-    final_cache_mb = kv_cache_size_mb(past_key_values)
-    mean_cache_mb = sum(cache_mb_history) / len(cache_mb_history)
-    uncompressed_cache_mb = theoretical_kv_cache_size_mb(
-        model=model,
-        seq_len=NUM_TOKENS,
-        batch_size=1,
+    actual_final_cache_mb = cache_mb_history[-1]
+    actual_mean_cache_mb = sum(cache_mb_history) / len(cache_mb_history)
+    baseline_final_cache_mb = baseline_cache_mb_history[-1]
+    baseline_mean_cache_mb = (
+        sum(baseline_cache_mb_history) / len(baseline_cache_mb_history)
     )
-    memory_saved_percent_final = 100 * (
-        1 - final_cache_mb / (uncompressed_cache_mb + 1e-8)
-    )
-    memory_saved_percent_mean = 100 * (
-        1 - mean_cache_mb / (uncompressed_cache_mb + 1e-8)
-    )
+    if config["use_compression"]:
+        memory_saved_percent_final = 100 * (
+            1 - actual_final_cache_mb / baseline_final_cache_mb
+        )
+        memory_saved_percent_mean = 100 * (
+            1 - actual_mean_cache_mb / baseline_mean_cache_mb
+        )
+    else:
+        memory_saved_percent_final = 0.0
+        memory_saved_percent_mean = 0.0
 
     return {
         "config": config_name,
         "num_tokens": NUM_TOKENS,
         "next_token_accuracy": correct / NUM_TOKENS,
         "perplexity": math.exp(mean_loss),
-        "final_cache_mb": final_cache_mb,
-        "mean_cache_mb": mean_cache_mb,
-        "uncompressed_cache_mb": uncompressed_cache_mb,
+        "actual_final_cache_mb": actual_final_cache_mb,
+        "actual_mean_cache_mb": actual_mean_cache_mb,
+        "baseline_final_cache_mb": baseline_final_cache_mb,
+        "baseline_mean_cache_mb": baseline_mean_cache_mb,
         "memory_saved_percent_final": memory_saved_percent_final,
         "memory_saved_percent_mean": memory_saved_percent_mean,
     }
@@ -184,12 +210,38 @@ def main() -> None:
     results_dir.mkdir(exist_ok=True)
 
     print(f"Loading {MODEL_NAME}")
-    model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
+    model, tokenizer = load_model_and_tokenizer(
+        MODEL_NAME,
+        dtype=DTYPE,
+        attn_implementation=ATTN_IMPLEMENTATION,
+    )
+
+    skip_layers = get_default_skip_layers()
+    metadata = make_run_metadata(
+        script=Path(__file__).name,
+        model_name=MODEL_NAME,
+        model=model,
+        requested_dtype=DTYPE,
+        attention_implementation=ATTN_IMPLEMENTATION,
+        seed=SEED,
+        lengths=[NUM_TOKENS],
+        depths=None,
+        configurations=ONLINE_LM_CONFIGS,
+        skip_layers=skip_layers,
+        extra={
+            "dataset_name": DATASET_NAME,
+            "dataset_config": DATASET_CONFIG,
+            "dataset_split": DATASET_SPLIT,
+            "max_cache_tokens": MAX_CACHE_TOKENS,
+        },
+    )
+    print_run_metadata(metadata)
+    save_run_metadata(results_dir / "run_metadata.json", metadata)
 
     print(f"Loading {DATASET_NAME}/{DATASET_CONFIG} ({DATASET_SPLIT})")
     token_ids = load_token_sequence(tokenizer, NUM_TOKENS)
     print(f"Loaded {token_ids.shape[1]} tokens for online evaluation")
-    print(f"Using skip layers for compressed configs: {get_default_skip_layers()}")
+    print(f"Using skip layers for compressed configs: {skip_layers}")
     print(f"Using max cache budget: {MAX_CACHE_TOKENS} tokens")
 
     rows = [
@@ -204,9 +256,10 @@ def main() -> None:
     df = pd.DataFrame(rows, columns=COLUMNS)
     df["next_token_accuracy"] = df["next_token_accuracy"].round(4)
     df["perplexity"] = df["perplexity"].round(4)
-    df["final_cache_mb"] = df["final_cache_mb"].round(2)
-    df["mean_cache_mb"] = df["mean_cache_mb"].round(2)
-    df["uncompressed_cache_mb"] = df["uncompressed_cache_mb"].round(2)
+    df["actual_final_cache_mb"] = df["actual_final_cache_mb"].round(2)
+    df["actual_mean_cache_mb"] = df["actual_mean_cache_mb"].round(2)
+    df["baseline_final_cache_mb"] = df["baseline_final_cache_mb"].round(2)
+    df["baseline_mean_cache_mb"] = df["baseline_mean_cache_mb"].round(2)
     df["memory_saved_percent_final"] = df["memory_saved_percent_final"].round(2)
     df["memory_saved_percent_mean"] = df["memory_saved_percent_mean"].round(2)
 

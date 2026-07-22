@@ -1,58 +1,130 @@
 # KV Cache Compression Benchmark
 
-Minimal L2-norm KV-cache compression benchmark for Qwen2.5-3B-Instruct.
+Small, script-first benchmark for L2-norm KV-cache compression with Hugging
+Face `DynamicCache`. The main model is `Qwen/Qwen2.5-3B-Instruct`; layers 0 and
+1 remain uncompressed.
 
-The main benchmark path is intentionally small:
+The implementation follows the core observation of
+[`alessiodevoto/l2compress`](https://github.com/alessiodevoto/l2compress):
+`low_l2` retains keys with the smallest L2 norm. The same temporal indices are
+applied to values and restored to chronological order before the cache is used
+again.
 
-- standard passkey task only
-- context lengths: `8192`, `32768`
-- depth: `0.5`
-- seed: `0`
-- configs: `no_compression`, `low_l2_keep50`, `low_l2_keep10`
-- compressed configs use `get_default_skip_layers()`
+## Kaggle Quickstart
 
-## Kaggle Usage
+Enable Internet in the Kaggle notebook settings and select a GPU accelerator.
+Then run these cells:
 
-```bash
-pip install -e .
-python scripts/run_basic_passkey.py
+```python
+!git clone https://github.com/giankev/KV_Cache-Compression-Benchmark.git
+%cd KV_Cache-Compression-Benchmark
+!pip install -r requirements-kaggle.txt
+!pip install -e .
 ```
 
-The benchmark prints raw and summary dataframes, then saves:
+Run the 0.5B smoke test before the 3B benchmark:
 
-- `results/basic_passkey_raw.csv`
-- `results/basic_passkey_summary.csv`
-
-For the token-by-token WikiText online LM evaluation:
-
-```bash
-python scripts/run_online_lm.py
+```python
+!python scripts/smoke_test_qwen.py
+!python scripts/run_basic_passkey.py
+!python scripts/run_online_lm.py
 ```
 
-This writes `results/online_lm_summary.csv`.
+The first execution downloads the Qwen model and, for online LM evaluation,
+WikiText. No notebook is required: every experiment is an ordinary Python
+script.
 
-To save an attention/L2 heatmap:
+Existing visualizations can also be generated from Kaggle cells:
 
-```bash
-python scripts/show_attention_l2.py
+```python
+!python scripts/show_attention_l2.py
+!python scripts/show_alr_heatmap.py
 ```
 
-This writes `results/attention_l2_heatmap.png`. Add `--show` to display it.
+CSV and JSON outputs are written under `results/`; visualization scripts write
+PNG files there as well. Each executable records the current software/model
+settings in `results/run_metadata.json` (the latest run replaces that file).
 
-`src/l2kv/alr.py` and `scripts/run_alr_scan.py` are kept for exploratory ALR
-work, but they are not part of the main benchmark path.
+## Passkey benchmark
+
+The default demonstration uses:
+
+- model: `Qwen/Qwen2.5-3B-Instruct`;
+- context lengths: 8192 and 32768 tokens;
+- needle depths: 0.25, 0.50, and 0.75;
+- seed: 0;
+- configurations: `no_compression`, `low_l2_keep50`, `low_l2_keep10`,
+  `random_keep50`, and `high_l2_keep50`.
+
+This gives `2 * 3 * 1 * 5 = 30` runs. The prompt is assembled directly from
+token IDs, so `context_len_actual` equals its target exactly. Compression is
+performed once after context prefill. Memory before and immediately after that
+compression is measured from the actual cache tensors; final generation memory
+is stored separately.
+
+With one seed and only three depths this is a demonstrative university
+benchmark, not a statistically conclusive evaluation.
+
+For a quick reduced check of all five strategies:
+
+```bash
+python scripts/run_basic_passkey.py \
+  --model-name Qwen/Qwen2.5-0.5B-Instruct \
+  --context-lengths 256 \
+  --depths 0.5 \
+  --seeds 0 \
+  --prune-after 0 \
+  --output-prefix basic_passkey_reduced
+```
+
+The default passkey outputs are:
+
+- `results/basic_passkey_raw.csv`;
+- `results/basic_passkey_summary.csv`.
+
+## Online language modeling and ALR
+
+`scripts/run_online_lm.py` evaluates WikiText token by token with a fixed cache
+budget and writes `results/online_lm_summary.csv`. Its average memory comparison
+uses a theoretical uncompressed baseline at the same logical step, rather than
+the final baseline for every step.
+
+`scripts/run_alr_scan.py` remains an exploratory tool. It measures attention/L2
+only over tokens that were present before the decode query and writes its CSV
+files under `results/`. It does not alter the fixed `(0, 1)` skip-layer choice
+used by the benchmark.
+
+## Reproducibility and cache positions
+
+The selected dependency set is pinned in `requirements-kaggle.txt`, including
+`transformers==4.57.6`, whose `DynamicCache.layers` API is used directly.
+Random passkey numbers and random cache selection use local seed-derived random
+sources; the compression functions never call global `torch.manual_seed`.
+
+After pruning, the logical token position is kept separate from every layer's
+physical cache length. With batch size 1 and no padding, question/answer tokens
+are forwarded one at a time with explicit `position_ids` and `cache_position`.
+No all-ones attention mask is inferred from the longer layer 0. This supported
+path is checked by `scripts/smoke_test_qwen.py`.
+
+## Tests
+
+```bash
+python -m pytest -q
+python scripts/smoke_test_qwen.py
+```
+
+Unit tests use a synthetic DynamicCache-compatible object and do not download a
+model. The smoke test downloads `Qwen/Qwen2.5-0.5B-Instruct`.
 
 ## Structure
 
-- `scripts/run_basic_passkey.py` - the main benchmark.
-- `scripts/run_online_lm.py` - token-by-token WikiText online LM benchmark.
-- `scripts/show_attention_l2.py` - attention/L2 visualization helper.
-- `scripts/show_alr_heatmap.py` - layer/head ALR heatmap helper.
-- `scripts/run_alr_scan.py` - optional ALR scan.
-- `src/l2kv/cache_compression.py` - in-place DynamicCache compression.
-- `src/l2kv/cache_metrics.py` - actual and theoretical KV cache sizes.
-- `src/l2kv/configs.py` - the three basic benchmark configs.
-- `src/l2kv/model_utils.py` - model/tokenizer loading.
-- `src/l2kv/passkey.py` - standard passkey prompt and strict-context generation.
-- `src/l2kv/attention_viz.py` - attention/L2 and ALR heatmaps.
-- `src/l2kv/alr.py` - ALR scan and skip-layer suggestions.
+- `src/l2kv/cache_compression.py` - validated in-place cache compression.
+- `src/l2kv/passkey.py` - exact-token prompt construction and greedy decoding.
+- `src/l2kv/position_utils.py` - shared logical-position helpers.
+- `src/l2kv/cache_metrics.py` - actual and theoretical cache sizes.
+- `src/l2kv/alr.py` - exploratory ALR calculation.
+- `scripts/run_basic_passkey.py` - main passkey benchmark.
+- `scripts/run_online_lm.py` - online WikiText benchmark.
+- `scripts/smoke_test_qwen.py` - heterogeneous-layer forward smoke test.
+- `docs/IMPLEMENTATION_NOTES.md` - concise implementation/exam notes.

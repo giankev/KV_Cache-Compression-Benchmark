@@ -15,7 +15,7 @@ BASIC_PASSKEY_CONFIGS: list[dict[str, Any]] = [
         "use_compression": False,
         "keep_ratio": 1.0,
         "strategy": "low_l2",
-        "skip_layers": (),
+        "skip_layers": get_default_skip_layers(),
     },
     {
         "config": "low_l2_keep50",
@@ -29,6 +29,20 @@ BASIC_PASSKEY_CONFIGS: list[dict[str, Any]] = [
         "use_compression": True,
         "keep_ratio": 0.1,
         "strategy": "low_l2",
+        "skip_layers": get_default_skip_layers(),
+    },
+    {
+        "config": "random_keep50",
+        "use_compression": True,
+        "keep_ratio": 0.5,
+        "strategy": "random",
+        "skip_layers": get_default_skip_layers(),
+    },
+    {
+        "config": "high_l2_keep50",
+        "use_compression": True,
+        "keep_ratio": 0.5,
+        "strategy": "high_l2",
         "skip_layers": get_default_skip_layers(),
     },
 ]

@@ -9,11 +9,20 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from l2kv.alr import scan_alr_qwen_decode_step, summarize_alr_by_layer
 from l2kv.attention_viz import plot_alr_heatmap
+from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
+from l2kv.runtime_metadata import (
+    make_run_metadata,
+    print_run_metadata,
+    save_run_metadata,
+)
 
 
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 MAX_TOKENS = 128
+SEED = 0
+DTYPE = "auto"
+ATTN_IMPLEMENTATION = "eager"
 
 TEXTS = [
     "An embarrassingly simple way to compress the KV cache. "
@@ -45,7 +54,26 @@ def main() -> None:
     summary_path = results_dir / "alr_layer_summary.csv"
     heatmap_path = results_dir / "alr_heatmap.png"
 
-    model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
+    model, tokenizer = load_model_and_tokenizer(
+        MODEL_NAME,
+        dtype=DTYPE,
+        attn_implementation=ATTN_IMPLEMENTATION,
+    )
+    metadata = make_run_metadata(
+        script=Path(__file__).name,
+        model_name=MODEL_NAME,
+        model=model,
+        requested_dtype=DTYPE,
+        attention_implementation=ATTN_IMPLEMENTATION,
+        seed=SEED,
+        lengths=[MAX_TOKENS],
+        depths=None,
+        configurations=[{"name": "alr_heatmap"}],
+        skip_layers=get_default_skip_layers(),
+        extra={"num_texts": len(TEXTS)},
+    )
+    print_run_metadata(metadata)
+    save_run_metadata(results_dir / "run_metadata.json", metadata)
 
     alr_df = scan_alr_qwen_decode_step(
         model=model,

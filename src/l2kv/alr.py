@@ -7,6 +7,7 @@ import torch
 
 from .cache_metrics import get_cache_layer
 from .model_utils import get_model_config
+from .position_utils import make_cache_position, make_position_ids
 
 
 def debug_attention_l2_shapes(
@@ -129,28 +130,62 @@ def scan_alr_qwen_decode_step(
 
         cache = prefill_out.past_key_values
 
-        K0, _ = get_cache_layer(cache, 0)
-        cache_len = K0.shape[2]
+        logical_position = int(inputs["input_ids"].shape[1])
+        original_layer_lengths: list[int] = []
+        prefill_l2_by_layer: list[torch.Tensor] = []
+        for layer_idx in range(num_layers):
+            prefill_keys, _ = get_cache_layer(cache, layer_idx)
+            original_cache_len = int(prefill_keys.shape[2])
+            prefill_l2 = (
+                prefill_keys[0]
+                .detach()
+                .float()
+                .pow(2)
+                .sum(dim=-1)
+                .sqrt()
+                .cpu()
+            )
+            if prefill_l2.shape[-1] != original_cache_len:
+                raise AssertionError(
+                    f"Layer {layer_idx}: prefill L2 length "
+                    f"{prefill_l2.shape[-1]} != original cache length "
+                    f"{original_cache_len}"
+                )
+            original_layer_lengths.append(original_cache_len)
+            prefill_l2_by_layer.append(prefill_l2)
 
         next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
-        attention_mask_step = torch.ones(
-            (batch_size, cache_len + 1),
-            device=device,
-            dtype=torch.long,
+        prefill_attention_mask = inputs.get("attention_mask")
+        if prefill_attention_mask is None:
+            prefill_attention_mask = torch.ones(
+                (batch_size, logical_position),
+                device=device,
+                dtype=torch.long,
+            )
+        attention_mask_step = torch.cat(
+            (
+                prefill_attention_mask,
+                torch.ones(
+                    (batch_size, 1),
+                    device=device,
+                    dtype=prefill_attention_mask.dtype,
+                ),
+            ),
+            dim=-1,
         )
-
-        cache_position = torch.tensor(
-            [cache_len],
+        position_ids = make_position_ids(
+            start_position=logical_position,
+            length=1,
             device=device,
-            dtype=torch.long,
         )
 
         decode_out = model(
             input_ids=next_token,
             attention_mask=attention_mask_step,
             past_key_values=cache,
-            cache_position=cache_position,
+            position_ids=position_ids,
+            cache_position=make_cache_position(position_ids),
             use_cache=True,
             output_attentions=True,
             return_dict=True,
@@ -163,8 +198,8 @@ def scan_alr_qwen_decode_step(
             )
 
         for layer_idx in range(num_layers):
-            K, _ = get_cache_layer(cache, layer_idx)
-            layer_cache_len = K.shape[2]
+            original_cache_len = original_layer_lengths[layer_idx]
+            layer_l2 = prefill_l2_by_layer[layer_idx]
 
             for q_head in range(num_q_heads):
                 kv_head = q_head // group_size
@@ -175,15 +210,27 @@ def scan_alr_qwen_decode_step(
                     .float()
                     .cpu()
                 )
+                l2 = layer_l2[kv_head]
 
-                keys = K[0, kv_head].detach().float().cpu()
-                l2 = keys.pow(2).sum(dim=-1).sqrt()
+                expected_attention_len = original_cache_len + 1
+                if attn_full.numel() != expected_attention_len:
+                    raise AssertionError(
+                        f"Layer {layer_idx}, q_head {q_head}: decode attention "
+                        f"length {attn_full.numel()} != original cache length "
+                        f"{original_cache_len} + query token"
+                    )
+                if l2.numel() != original_cache_len:
+                    raise AssertionError(
+                        f"Layer {layer_idx}, kv_head {kv_head}: L2 length "
+                        f"{l2.numel()} != original cache length "
+                        f"{original_cache_len}"
+                    )
 
                 if debug_shapes:
                     debug_attention_l2_shapes(
                         attn_full=attn_full,
                         l2=l2,
-                        cache_len=layer_cache_len,
+                        cache_len=original_cache_len,
                         layer_idx=layer_idx,
                         q_head=q_head,
                         kv_head=kv_head,
@@ -191,8 +238,14 @@ def scan_alr_qwen_decode_step(
 
                 attn_cache = extract_attention_over_cache(
                     attn_full=attn_full,
-                    cache_len=layer_cache_len,
+                    cache_len=original_cache_len,
                 )
+                if attn_cache.numel() != original_cache_len:
+                    raise AssertionError(
+                        f"Layer {layer_idx}, q_head {q_head}: cached attention "
+                        f"length {attn_cache.numel()} != original cache length "
+                        f"{original_cache_len}"
+                    )
 
                 alr = compute_alr_from_attention_and_l2(
                     attn_scores=attn_cache,
@@ -206,7 +259,7 @@ def scan_alr_qwen_decode_step(
                         "layer": layer_idx,
                         "q_head": q_head,
                         "kv_head": kv_head,
-                        "seq_len": layer_cache_len,
+                        "seq_len": original_cache_len,
                         "alr_sum": alr["alr_sum"],
                         "alr_mean": alr["alr_mean"],
                     }
