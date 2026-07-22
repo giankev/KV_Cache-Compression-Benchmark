@@ -94,6 +94,16 @@ preserves the memory benefit of Grouped-Query Attention. The paper's pseudocode
 uses a single generic head dimension and does not specify this aggregation, so
 the native-GQA behavior is a repository adaptation.
 
+### Sharded models
+
+With `device_map="auto"`, Hugging Face Accelerate can return a layer's attention
+scores on a different GPU from that layer's `DynamicCache` tensors. Immediately
+before pooling, SnapKV moves only that layer's float32 score tensor to the local
+K/V device. Pooling, top-k selection, and gathering then remain local to that
+GPU; keys, values, and complete cache layers are never transferred between
+devices. The temporary local score copy and selection tensors are released as
+soon as the layer has been rewritten.
+
 ## Capacity and fair comparison
 
 For a requested keep ratio, this benchmark defines a total retained prompt

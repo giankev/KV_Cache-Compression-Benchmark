@@ -437,9 +437,16 @@ def compress_snapkv_cache(
                 f"Layer {layer_idx} scores must have shape {expected_shape}; "
                 f"got {tuple(scores.shape)}"
             )
+        # Accelerate may return a layer's attention tensor on a different GPU
+        # from that layer's DynamicCache tensors when the model is sharded.
         if scores.device != keys.device:
+            scores = scores.to(device=keys.device, non_blocking=True)
+        if scores.dtype != torch.float32:
+            scores = scores.float()
+        if not (scores.device == keys.device == values.device):
             raise ValueError(
-                f"Layer {layer_idx} scores and cache tensors must share a device"
+                f"Layer {layer_idx} score/K/V device alignment failed: "
+                f"scores={scores.device}, K={keys.device}, V={values.device}"
             )
         _require_finite(scores, f"Layer {layer_idx} scores")
 
@@ -458,6 +465,9 @@ def compress_snapkv_cache(
             prefix_indices,
             observation_window_size=observation_window_size,
         )
+        del pooled_scores
+        del prefix_indices
+        del scores
         layer.keys = compressed_keys
         layer.values = compressed_values
 

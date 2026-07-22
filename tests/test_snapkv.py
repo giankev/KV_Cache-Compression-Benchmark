@@ -131,6 +131,68 @@ def test_compression_hits_total_capacity_and_leaves_skip_layer_untouched() -> No
     assert torch.equal(active.values[..., -2:, :], active_observation_values)
 
 
+def test_compression_with_scores_on_same_device_keeps_selection_behavior() -> None:
+    layer = _make_layer(sequence=6)
+    original_keys = layer.keys.clone()
+    original_values = layer.values.clone()
+    scores = torch.tensor([[[0.1, 0.9, 0.2, 0.8]]], dtype=torch.float32)
+
+    compress_snapkv_cache(
+        FakeCache(layer),
+        scores_by_layer=(scores,),
+        target_capacity=4,
+        observation_window_size=2,
+        pooling_kernel_size=1,
+    )
+
+    expected_positions = torch.tensor([1, 3, 4, 5])
+    assert torch.equal(layer.keys, original_keys.index_select(2, expected_positions))
+    assert torch.equal(
+        layer.values,
+        original_values.index_select(2, expected_positions),
+    )
+    assert scores.device == original_keys.device
+    assert scores.dtype == torch.float32
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="requires at least two CUDA GPUs",
+)
+def test_compression_aligns_scores_to_sharded_layer_device() -> None:
+    score_device = torch.device("cuda:0")
+    cache_device = torch.device("cuda:1")
+    layer = _make_layer(sequence=6)
+    layer.keys = layer.keys.to(cache_device)
+    layer.values = layer.values.to(cache_device)
+    original_keys = layer.keys.clone()
+    original_values = layer.values.clone()
+    scores = torch.tensor(
+        [[[0.1, 0.9, 0.2, 0.8]]],
+        dtype=torch.float32,
+        device=score_device,
+    )
+
+    compress_snapkv_cache(
+        FakeCache(layer),
+        scores_by_layer=(scores,),
+        target_capacity=4,
+        observation_window_size=2,
+        pooling_kernel_size=1,
+    )
+
+    expected_positions = torch.tensor([1, 3, 4, 5], device=cache_device)
+    assert layer.keys.device == cache_device
+    assert layer.values.device == cache_device
+    assert torch.equal(layer.keys, original_keys.index_select(2, expected_positions))
+    assert torch.equal(
+        layer.values,
+        original_values.index_select(2, expected_positions),
+    )
+    assert scores.device == score_device
+    assert scores.dtype == torch.float32
+
+
 def test_total_capacity_uses_floor_and_validates_observation_budget() -> None:
     assert compute_target_capacity(prompt_length=7, keep_ratio=0.5) == 3
     assert validate_snapkv_capacity(7, 3, 2) == 1
