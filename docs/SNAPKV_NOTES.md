@@ -106,8 +106,8 @@ soon as the layer has been rewritten.
 
 ## Capacity and fair comparison
 
-For a requested keep ratio, this benchmark defines a total retained prompt
-capacity:
+The compression function accepts a total retained prompt capacity. When that
+capacity is derived from a keep ratio, the relation is:
 
 ```text
 target_capacity = floor(L_prompt * keep_ratio)
@@ -122,14 +122,16 @@ k_prefix selected prefix tokens + L_obs observation tokens
 
 `target_capacity` must be at least `L_obs`. A keep ratio of 1 is a no-op. Layers
 listed in `skip_layers` are not changed; the benchmark uses layers 0 and 1 to
-match the existing L2 configurations.
+match the existing L2 configurations. The passkey runner supplies one absolute
+capacity (1024 tokens by default), rather than evaluating a ratio grid.
 
 This total-capacity rule follows the capacity semantics of Listing 1, where the
 observation window is included in `max_capacity_prompt`. The paper's separate
 ratio formula defines `floor(p * L_prefix)` selected prefix tokens, which would
-give a slightly different total. The repository rule is intentional: methods
-with the same keep ratio have the same physical cache length in compressed
-layers. The paper does not prescribe the `(0, 1)` skip-layer setting.
+give a slightly different total. The repository rule is intentional: an
+absolute target describes the complete physical prompt-cache length in
+compressed layers. The paper does not prescribe the `(0, 1)` skip-layer
+setting.
 
 ## SnapKV versus L2 selection
 
@@ -143,14 +145,13 @@ weights. SnapKV instead needs an observation pass and therefore lives in a
 separate module rather than being another norm-only option in
 `cache_compression.py`.
 
-## Harder synthetic retrieval benchmark
+## Passkey benchmark
 
-The key-value retrieval benchmark contains many distractor records with exactly
-the same structure as the target record. The model must associate one unique
-textual key with one unique five-digit value. This is harder than the
-simple passkey task because formatting does not distinguish the target from the
-distractors; the final question must guide attention toward the correct record.
-This mirrors the paper's motivation for its modified LongEval-Lines evaluation.
+SnapKV and the L2 methods receive the same professor-style prompt: one passkey
+appears twice inside repeated irrelevant text, at a position selected from the
+seed. The complete final question is the prompt suffix and must fit inside the
+observation window. Accuracy is a direct token-ID comparison over exactly the
+tokenized answer length.
 
 ## Scope and limitations
 

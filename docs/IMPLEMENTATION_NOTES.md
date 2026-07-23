@@ -67,11 +67,11 @@ custom attention layer.
   diverse; dopo il pruning non viene costruita una mask all-ones condivisa.
 - **Prompt approssimato:** il filler veniva decodificato e ritokenizzato; ora il
   contesto è composto direttamente da token ID ed è lungo esattamente quanto il
-  target. Viene salvata anche la posizione effettiva della needle.
+  target. Viene salvata anche la posizione effettiva dell'information line.
 - **Random non riproducibile:** non si usa più stato globale; numero passkey e
   selezione cache hanno generatori locali derivati dal seed dell'esempio.
-- **Memoria passkey:** `before` è misurata subito dopo il prefill e `after`
-  subito dopo il pruning. La cache finale è un campo separato.
+- **Memoria passkey:** la memoria è misurata subito dopo il prefill e subito
+  dopo il pruning; il raw CSV conserva la percentuale risparmiata.
 - **Memoria media online LM:** cache compressa e baseline teorica vengono
   confrontate allo stesso passo temporale, sia come media sia alla fine.
 - **ALR mutata in-place:** lunghezze e key del prefill vengono salvate prima del
@@ -79,19 +79,25 @@ custom attention layer.
 
 ## 8. Benchmark
 
-Il modello principale è `Qwen/Qwen2.5-3B-Instruct`. Il benchmark passkey usa
-contesti 8192 e 32768, depth 0.25/0.50/0.75, seed 0 e cinque configurazioni:
-`no_compression`, `low_l2_keep50`, `low_l2_keep10`, `random_keep50` e
-`high_l2_keep50`. I layer 0 e 1 non vengono compressi. Sono quindi 30 run.
+Il modello principale è `Qwen/Qwen2.5-3B-Instruct`. Il benchmark riprende il
+task professor-style di `l2compress/eval_passkey.py`: un solo passkey, garbage
+ripetuto, posizione casuale per seed e confronto esatto dei token della
+risposta. Il prompt viene costruito direttamente da token ID e ha esattamente
+la lunghezza richiesta.
 
-La compressione passkey è eseguita una sola volta, dopo il prefill. Lo stack
-Kaggle è fissato in `requirements-kaggle.txt`; `transformers==4.57.6` espone la
-API `DynamicCache.layers` usata dal codice.
+Il runner L2 usa `no_compression`, `low_l2`, `random` e `high_l2` con keep ratio
+comune 0.8. Il runner SnapKV usa soltanto `no_compression` e `snapkv`. Entrambi
+aggregano l'accuracy sui dieci seed effettivamente eseguiti e interrompono le
+configurazioni compresse quando la baseline dello stesso prompt fallisce.
+
+La compressione è eseguita una sola volta, dopo il prefill. Lo stack Kaggle è
+fissato in `requirements-kaggle.txt`; `transformers==4.57.6` espone l'API
+`DynamicCache.layers` usata dal codice.
 
 ## 9. Limiti
 
-- un solo modello principale e un solo seed;
-- tre sole depth e pochi esempi;
+- un solo modello principale;
+- dieci passkey sintetici per lunghezza di contesto;
 - compressione esclusivamente post-prefill nel passkey;
 - selezione indipendente per head KV, come nel metodo di riferimento;
 - percorso post-pruning limitato a batch size 1 senza padding e forward da un

@@ -15,7 +15,7 @@ from l2kv.cache_compression import compress_cache
 from l2kv.cache_metrics import cache_layer_lengths, get_cache_layer
 from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
-from l2kv.passkey import make_passkey_prompt
+from l2kv.passkey import make_passkey_example
 from l2kv.position_utils import make_cache_position, make_position_ids
 from l2kv.runtime_metadata import (
     make_run_metadata,
@@ -28,7 +28,6 @@ MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 CONTEXT_TOKENS = 256
 KEEP_RATIO = 0.5
 SEED = 0
-DEPTH = 0.5
 DTYPE = "auto"
 ATTN_IMPLEMENTATION = "eager"
 
@@ -72,7 +71,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         attention_implementation=args.attention_implementation,
         seed=args.seed,
         lengths=[args.context_tokens],
-        depths=[DEPTH],
+        depths=None,
         configurations=[
             {
                 "strategy": "low_l2",
@@ -85,14 +84,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     print_run_metadata(metadata)
     save_run_metadata(results_dir / "run_metadata.json", metadata)
 
-    prompt = make_passkey_prompt(
+    prompt = make_passkey_example(
         tokenizer=tokenizer,
-        target_tokens=args.context_tokens,
+        context_length=args.context_tokens,
         seed=args.seed,
-        depth=DEPTH,
     )
     context_ids = torch.tensor(
-        prompt.context_ids,
+        prompt.prompt_ids,
         dtype=torch.long,
         device=device,
     ).unsqueeze(0)
@@ -148,11 +146,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise AssertionError("Skip layers are not longer than compressed layers")
 
     logical_position = args.context_tokens
-    question_token = torch.tensor(
-        [[prompt.question_ids[0]]],
-        dtype=torch.long,
-        device=device,
-    )
+    question_token = prefill_out.logits[:, -1, :].argmax(
+        dim=-1,
+        keepdim=True,
+    ).to(device)
     position_ids = make_position_ids(logical_position, 1, device)
     cache_position = make_cache_position(position_ids)
     if position_ids.tolist() != [[args.context_tokens]]:

@@ -17,7 +17,7 @@ from l2kv.cache_metrics import (
     get_cache_layer,
     num_cache_layers,
 )
-from l2kv.kv_retrieval import make_kv_retrieval_prompt
+from l2kv.passkey import make_passkey_example
 from l2kv.model_utils import get_model_config, load_model_and_tokenizer
 from l2kv.position_utils import make_cache_position, make_position_ids
 from l2kv.runtime_metadata import (
@@ -37,7 +37,6 @@ POOLING_MODE = "max"
 SKIP_LAYERS = (0, 1)
 CHUNK_SIZE = 64
 SEED = 0
-DEPTH = 0.5
 DTYPE = "auto"
 ATTENTION_IMPLEMENTATION = "eager"
 
@@ -200,7 +199,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         attention_implementation=args.attention_implementation,
         seed=args.seed,
         lengths=[args.context_tokens],
-        depths=[DEPTH],
+        depths=None,
         configurations=[
             {
                 "strategy": "snapkv",
@@ -222,12 +221,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     print_run_metadata(metadata)
     save_run_metadata(results_dir / "run_metadata.json", metadata)
 
-    prompt = make_kv_retrieval_prompt(
+    prompt = make_passkey_example(
         tokenizer=tokenizer,
-        target_tokens=args.context_tokens,
+        context_length=args.context_tokens,
         observation_window_size=args.observation_window_size,
         seed=args.seed,
-        depth=DEPTH,
     )
     result = prefill_and_score_snapkv(
         model=model,

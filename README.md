@@ -1,365 +1,178 @@
 # KV Cache Compression Benchmark
 
-Small, script-first benchmark for L2-norm and SnapKV KV-cache compression with
-Hugging Face `DynamicCache`. The main model is `Qwen/Qwen2.5-3B-Instruct`;
-layers 0 and 1 remain uncompressed.
+Small Hugging Face benchmark for post-prefill KV-cache compression with
+Qwen2.5. It compares:
 
-The implementation follows the core observation of
-[`alessiodevoto/l2compress`](https://github.com/alessiodevoto/l2compress):
-`low_l2` retains keys with the smallest L2 norm. The same temporal indices are
-applied to values and restored to chronological order before the cache is used
-again.
+- no compression;
+- low-L2, random, and high-L2 token selection;
+- SnapKV attention-based token selection.
 
-## Kaggle Quickstart
+The L2 and SnapKV implementations are intentionally separate. The online
+language-modelling benchmark remains available in `scripts/run_online_lm.py`.
 
-Enable Internet in the Kaggle notebook settings and select a GPU accelerator.
-Then run these cells:
+## Setup
 
-```python
-!git clone https://github.com/giankev/KV_Cache-Compression-Benchmark.git
-%cd KV_Cache-Compression-Benchmark
-!pip install -r requirements-kaggle.txt
-!pip install -e .
-```
-
-Run the 0.5B smoke test before the 3B benchmark:
-
-```python
-!python scripts/smoke_test_qwen.py
-!python scripts/run_basic_passkey.py
-!python scripts/run_online_lm.py
-```
-
-The first execution downloads the Qwen model and, for online LM evaluation,
-WikiText. No notebook is required: every experiment is an ordinary Python
-script.
-
-Existing visualizations can also be generated from Kaggle cells:
-
-```python
-!python scripts/show_attention_l2.py
-!python scripts/show_alr_heatmap.py
-```
-
-CSV and JSON outputs are written under `results/`; visualization scripts write
-PNG files there as well. Each executable records the current software/model
-settings in `results/run_metadata.json` (the latest run replaces that file).
-
-## Passkey benchmark
-
-The default demonstration uses:
-
-- model: `Qwen/Qwen2.5-3B-Instruct`;
-- context lengths: 8192 and 32768 tokens;
-- needle depths: 0.25, 0.50, and 0.75;
-- seed: 0;
-- configurations: `no_compression`, `low_l2_keep50`, `low_l2_keep10`,
-  `random_keep50`, and `high_l2_keep50`.
-
-This gives `2 * 3 * 1 * 5 = 30` runs. The prompt is assembled directly from
-token IDs, so `context_len_actual` equals its target exactly. Compression is
-performed once after context prefill. Memory before and immediately after that
-compression is measured from the actual cache tensors; final generation memory
-is stored separately.
-
-With one seed and only three depths this is a demonstrative university
-benchmark, not a statistically conclusive evaluation.
-
-For a quick reduced check of all five strategies:
+Python 3.10-3.14 is supported.
 
 ```bash
-python scripts/run_basic_passkey.py \
-  --model-name Qwen/Qwen2.5-0.5B-Instruct \
-  --context-lengths 256 \
-  --depths 0.5 \
+python -m pip install -e ".[test]"
+```
+
+For Kaggle, use the pinned environment:
+
+```bash
+python -m pip install -r requirements-kaggle.txt
+```
+
+## Professor-style passkey benchmark
+
+The benchmark follows the single-passkey task in
+[`eval_passkey.py`](https://github.com/alessiodevoto/l2compress/blob/main/eval_passkey.py)
+and its greedy cache generation flow in
+[`gen_utils.py`](https://github.com/alessiodevoto/l2compress/blob/main/gen_utils.py):
+
+- one integer passkey between 1 and 50000;
+- repeated irrelevant text around the information line;
+- one random information position determined by each seed;
+- the passkey written twice in the information line;
+- the question at the end of the prompt;
+- exact token match over the answer length;
+- accuracy aggregated over 10 seeds by default.
+
+The prompt is assembled directly from separately tokenized component IDs. It
+has exactly `context_length` tokens and is never decoded and re-tokenized.
+`random.Random(seed)` isolates prompt generation from global random state.
+
+### Quick checks
+
+L2 with one seed:
+
+```bash
+python scripts/run_l2_passkey.py \
   --seeds 0 \
-  --prune-after 0 \
-  --output-prefix basic_passkey_reduced
+  --output-prefix l2_passkey_sanity
 ```
 
-The default passkey outputs are:
+SnapKV with one seed:
 
-- `results/basic_passkey_raw.csv`;
-- `results/basic_passkey_summary.csv`.
-
-## Generate the passkey heatmap
-
-Generate an accuracy-by-depth heatmap from the raw passkey CSV, which contains
-the `depth_target` column:
-
-```python
-!python scripts/plot_passkey_heatmap.py \
-  --input-csv results/passkey_3b_32k_depths_raw.csv \
-  --output results/passkey_3b_32k_depths_heatmap.png \
-  --title "Passkey retrieval accuracy by depth — Qwen2.5-3B, 32k context"
+```bash
+python scripts/run_snapkv_passkey.py \
+  --seeds 0 \
+  --output-prefix snapkv_passkey_sanity
 ```
 
-The script prints the aggregated accuracy table before saving the PNG. If more
-than one seed is present, each cell contains the mean accuracy for that
-configuration and depth.
+### Complete 8k experiment
 
-## Versioned key-value retrieval prompt
+```bash
+python scripts/run_l2_passkey.py \
+  --output-prefix l2_passkey_3b_8k
 
-The final L2 and SnapKV retrieval scripts both use the same deterministic
-`explicit_v2` prompt from `src/l2kv/kv_retrieval.py`. It starts with a short
-instruction, uses uniform records such as
-`Record: key=gentle-acmi; value=38733.`, and ends with the query. Padding is
-nonnumeric, appears before the query, and the complete query must fit inside
-the requested observation window. Prompt components are concatenated directly
-as token IDs without decode/re-encode.
+python scripts/run_snapkv_passkey.py \
+  --output-prefix snapkv_passkey_3b_8k
+```
 
-The original prompt remains available as `prompt_style=legacy`, and legacy
-scripts keep using it by default. For the same context length, depth, seed and
-prompt style, the two final runners generate identical prompt IDs and targets.
+The L2 runner evaluates `no_compression`, `low_l2`, `random`, and `high_l2`
+with the same default keep ratio of `0.8`. The SnapKV runner evaluates only
+`no_compression` and `snapkv`, with a 16-token observation window and a
+1024-token target cache by default.
 
-### Baseline gate and incremental checkpoints
+Each prompt is built once per context length and seed. The uncompressed
+baseline runs first. If it fails, that baseline row is saved and compressed
+configurations are not executed for the case.
 
-Both final runners execute `no_compression` first for each prompt. By default,
-if that baseline is wrong, compressed policies for that prompt are not run and
-their raw rows are marked `skipped_due_to_baseline_failure`. Disable this gate
-with `--no-require-baseline-success` when an ungated diagnostic is desired.
-The raw CSV is rewritten after every completed or gated row, so an interrupted
-Kaggle session retains all results collected up to that point.
+For later experiments, change only the context length and output prefix:
 
-## L2-norm key-value retrieval
+```bash
+python scripts/run_l2_passkey.py \
+  --context-lengths 16384 \
+  --output-prefix l2_passkey_3b_16k
 
-`scripts/run_l2_kv_retrieval.py` contains only `no_compression`, low-L2,
-random and high-L2 policies. It does not collect attention weights or execute
-SnapKV. The default run count is:
+python scripts/run_snapkv_passkey.py \
+  --context-lengths 16384 \
+  --output-prefix snapkv_passkey_3b_16k
+```
+
+Use `--context-lengths 32768` for the corresponding 32k experiment.
+
+### Outputs
+
+Every completed run immediately checkpoints:
 
 ```text
-1 context * 3 depths * 1 seed * 5 configurations = 15 runs
+results/<output-prefix>_raw.csv
 ```
 
-Run the final 3B/8k L2 benchmark on Kaggle:
-
-```python
-!python scripts/run_l2_kv_retrieval.py \
-  --output-prefix l2_kv_retrieval_3b_8k
-```
-
-Generate its configuration-by-depth heatmap from the raw CSV:
-
-```python
-!python scripts/plot_passkey_heatmap.py \
-  --input-csv results/l2_kv_retrieval_3b_8k_raw.csv \
-  --output results/l2_kv_retrieval_3b_8k_heatmap.png \
-  --title "L2-norm key-value retrieval accuracy by depth"
-```
-
-Rows suppressed by the baseline gate are ignored by the heatmap rather than
-being counted as incorrect predictions.
-
-## SnapKV key-value retrieval
-
-`scripts/run_snapkv_kv_retrieval.py` contains only `no_compression` and one
-fixed SnapKV configuration. Its paper-inspired defaults use an observation
-window of 16 tokens, pooling kernel 5 and an absolute cache capacity of 1024
-tokens. The default run count is three baselines plus three SnapKV runs:
+The raw columns are:
 
 ```text
-3 + 3 = 6 runs
+model_name, method, config, context_length, seed, actual_depth,
+target, prediction, correct, target_cache_tokens,
+memory_saved_percent, elapsed_seconds
 ```
 
-At the default 8192-token context, the retained prefix is `1024 - 16 = 1008`
-tokens followed by the untouched 16-token observation window. Thus 1024 is
-12.5% only when the prompt length is 8192; the benchmark reports the absolute
-capacity and the effective ratio separately for closer alignment with the
-paper. `--keep-ratio` remains available, but it is mutually exclusive with
-`--target-cache-tokens` and does not create a parameter grid.
+The summary contains:
 
-Run the final 3B/8k SnapKV benchmark on Kaggle:
-
-```python
-!python scripts/run_snapkv_kv_retrieval.py \
-  --target-cache-tokens 1024 \
-  --output-prefix snapkv_kv_retrieval_3b_8k
+```text
+config, context_length, num_examples, accuracy,
+mean_memory_saved_percent, mean_elapsed_seconds
 ```
 
-Generate the dedicated heatmap, including the fixed SnapKV parameters in its
-subtitle:
+Torch and Transformers versions, dtype, device map, skip layers, seeds, and
+method parameters are stored once in
+`results/<output-prefix>_metadata.json`.
 
-```python
-!python scripts/plot_snapkv_kv_retrieval.py \
-  --input-csv results/snapkv_kv_retrieval_3b_8k_raw.csv \
-  --output results/snapkv_kv_retrieval_3b_8k_heatmap.png
-```
-
-## Legacy mixed key-value retrieval benchmark
-
-The earlier mixed runner remains available unchanged for reproducing previous
-experiments. It combines L2-family policies and SnapKV in one invocation.
-
-SnapKV uses attention from a final observation window to select important
-prefix positions independently for each native KV head. The implementation is
-compatible with Qwen2.5 Grouped-Query Attention: votes from query heads that
-share a KV head are aggregated without permanently replicating the cache. See
-`docs/SNAPKV_NOTES.md` for the algorithm, fair-capacity convention, and
-limitations.
-
-Run the unit tests and the focused 0.5B SnapKV smoke test on Kaggle:
-
-```python
-!python -m pytest -q
-!python scripts/smoke_test_snapkv_qwen.py
-```
-
-Run the reduced benchmark across all seven configurations:
-
-```python
-!python scripts/run_kv_retrieval.py \
-  --model-name Qwen/Qwen2.5-0.5B-Instruct \
-  --context-lengths 256 \
-  --depths 0.5 \
-  --seeds 0 \
-  --observation-window-size 16 \
-  --pooling-kernel-size 5 \
-  --output-prefix kv_retrieval_reduced
-```
-
-Run the 3B, 32k benchmark at three target depths:
-
-```python
-!python scripts/run_kv_retrieval.py \
-  --model-name Qwen/Qwen2.5-3B-Instruct \
-  --context-lengths 32000 \
-  --depths 0.25 0.50 0.75 \
-  --seeds 0 \
-  --observation-window-size 64 \
-  --pooling-kernel-size 5 \
-  --output-prefix kv_retrieval_3b_32k
-```
-
-The raw output includes `config`, `depth_target`, and `correct`, so the same
-heatmap script used for the passkey benchmark can visualize it:
-
-```python
-!python scripts/plot_passkey_heatmap.py \
-  --input-csv results/kv_retrieval_3b_32k_raw.csv \
-  --output results/kv_retrieval_3b_32k_heatmap.png \
-  --title "Key-value retrieval accuracy by depth - Qwen2.5-3B, 32k context"
-```
-
-The 3B command is intended for Kaggle or another suitable GPU environment, not
-for a local CPU run.
-
-## SnapKV ablation
-
-`scripts/run_snapkv_ablation.py` runs only SnapKV and an optional uncompressed
-baseline on the same exact key-value retrieval prompts. The default grid has
-`1 * 3 * 1 * 3 * 1 * 1 = 9` SnapKV runs plus three baseline runs. It refuses to
-load the model when the total exceeds `--max-runs`.
-
-Run the focused unit tests:
+### Plot retrieval accuracy
 
 ```bash
-python -m pytest -q \
-  tests/test_snapkv_ablation.py \
-  tests/test_plot_snapkv_ablation.py
+python scripts/plot_retrieval.py \
+  --input-csv results/l2_passkey_3b_8k_raw.csv \
+  --output results/l2_passkey_3b_8k_accuracy.png \
+  --title "L2 passkey retrieval accuracy"
 ```
 
-Run a quick two-run check with the 0.5B model:
+The plot groups raw results by configuration and context length. It uses a
+headless Matplotlib backend and is suitable for Kaggle notebooks.
+
+## Smoke tests
+
+These scripts load Qwen models and are therefore separate from the unit suite:
 
 ```bash
-python scripts/run_snapkv_ablation.py \
-  --model-name Qwen/Qwen2.5-0.5B-Instruct \
-  --context-lengths 256 \
-  --depths 0.5 \
-  --seeds 0 \
-  --observation-window-sizes 16 \
-  --keep-ratios 0.5 \
-  --pooling-kernel-sizes 5 \
-  --max-new-tokens 12 \
-  --max-runs 2 \
-  --output-prefix snapkv_ablation_quick
-```
-
-Use this reduced 3B command as a sanity check before the full study:
-
-```bash
-python scripts/run_snapkv_ablation.py \
-  --model-name Qwen/Qwen2.5-3B-Instruct \
-  --context-lengths 4096 \
-  --depths 0.5 \
-  --seeds 0 \
-  --observation-window-sizes 16 \
-  --keep-ratios 0.1 \
-  --pooling-kernel-sizes 5 \
-  --max-runs 2 \
-  --output-prefix snapkv_ablation_3b_sanity
-```
-
-The complete default 3B/32k ablation performs 12 runs:
-
-```bash
-python scripts/run_snapkv_ablation.py \
-  --output-prefix snapkv_ablation_3b_32k
-```
-
-Generate its observation-window-by-depth heatmap from the raw CSV:
-
-```bash
-python scripts/plot_snapkv_ablation.py \
-  --input-csv results/snapkv_ablation_3b_32k_raw.csv \
-  --output results/snapkv_ablation_3b_32k_heatmap.png \
-  --title "SnapKV retrieval accuracy by observation window and depth"
-```
-
-## Online language modeling and ALR
-
-`scripts/run_online_lm.py` evaluates WikiText token by token with a fixed cache
-budget and writes `results/online_lm_summary.csv`. Its average memory comparison
-uses a theoretical uncompressed baseline at the same logical step, rather than
-the final baseline for every step.
-
-`scripts/run_alr_scan.py` remains an exploratory tool. It measures attention/L2
-only over tokens that were present before the decode query and writes its CSV
-files under `results/`. It does not alter the fixed `(0, 1)` skip-layer choice
-used by the benchmark.
-
-## Reproducibility and cache positions
-
-The selected dependency set is pinned in `requirements-kaggle.txt`, including
-`transformers==4.57.6`, whose `DynamicCache.layers` API is used directly.
-Random passkey numbers and random cache selection use local seed-derived random
-sources; the compression functions never call global `torch.manual_seed`.
-
-After pruning, the logical token position is kept separate from every layer's
-physical cache length. With batch size 1 and no padding, question/answer tokens
-are forwarded one at a time with explicit `position_ids` and `cache_position`.
-No all-ones attention mask is inferred from the longer layer 0. This supported
-path is checked by `scripts/smoke_test_qwen.py`.
-
-## Tests
-
-```bash
-python -m pytest -q
 python scripts/smoke_test_qwen.py
 python scripts/smoke_test_snapkv_qwen.py
 ```
 
-Unit tests use a synthetic DynamicCache-compatible object and do not download a
-model. The smoke test downloads `Qwen/Qwen2.5-0.5B-Instruct`.
+The first checks logical-position decoding with heterogeneous layer lengths.
+The second checks Qwen GQA attention aggregation, SnapKV compression, and
+post-compression decoding. SnapKV uses eager attention and retains support for
+models sharded by `device_map="auto"`.
 
-## Structure
+## Online language modelling
 
-- `src/l2kv/cache_compression.py` - validated in-place cache compression.
-- `src/l2kv/passkey.py` - exact-token prompt construction and greedy decoding.
-- `src/l2kv/snapkv.py` - observation-window voting and GQA-aware compression.
-- `src/l2kv/kv_retrieval.py` - exact-token synthetic key-value prompts.
-- `src/l2kv/kv_retrieval_eval.py` - shared retrieval prefill/decode utilities.
-- `src/l2kv/position_utils.py` - shared logical-position helpers.
-- `src/l2kv/cache_metrics.py` - actual and theoretical cache sizes.
-- `src/l2kv/alr.py` - exploratory ALR calculation.
-- `scripts/run_basic_passkey.py` - main passkey benchmark.
-- `scripts/run_kv_retrieval.py` - SnapKV and baseline retrieval benchmark.
-- `scripts/run_l2_kv_retrieval.py` - final L2-only retrieval benchmark.
-- `scripts/run_snapkv_kv_retrieval.py` - fixed-capacity SnapKV benchmark.
-- `scripts/plot_snapkv_kv_retrieval.py` - fixed SnapKV accuracy heatmap.
-- `scripts/run_snapkv_ablation.py` - controlled SnapKV-only ablation grid.
-- `scripts/plot_snapkv_ablation.py` - dedicated ablation heatmap.
-- `scripts/run_online_lm.py` - online WikiText benchmark.
-- `scripts/smoke_test_qwen.py` - heterogeneous-layer forward smoke test.
-- `scripts/smoke_test_snapkv_qwen.py` - GQA SnapKV integration smoke test.
-- `docs/IMPLEMENTATION_NOTES.md` - concise implementation/exam notes.
-- `docs/SNAPKV_NOTES.md` - paper summary, adaptations, and limitations.
+The existing online LM benchmark is unchanged:
+
+```bash
+python scripts/run_online_lm.py
+```
+
+## Main files
+
+- `src/l2kv/passkey.py`: exact professor-style prompt construction.
+- `src/l2kv/retrieval_eval.py`: shared prefill, compression evaluation, exact
+  answer generation, cache measurement, checkpointing, and summaries.
+- `scripts/run_l2_passkey.py`: L2-only runner.
+- `scripts/run_snapkv_passkey.py`: baseline and SnapKV runner.
+- `scripts/plot_retrieval.py`: generic accuracy-versus-context plot.
+- `src/l2kv/cache_compression.py`: L2/random cache policies.
+- `src/l2kv/snapkv.py`: SnapKV scoring and cache rewrite.
+
+Implementation details are in
+[`docs/IMPLEMENTATION_NOTES.md`](docs/IMPLEMENTATION_NOTES.md) and
+[`docs/SNAPKV_NOTES.md`](docs/SNAPKV_NOTES.md).
+
+## Scope
+
+Compression happens after the full prompt prefill. It reduces the retained
+cache and autoregressive attention cost, but not prefill compute or peak prompt
+memory. Results are an educational benchmark, not a comprehensive reproduction
+of either reference repository.
