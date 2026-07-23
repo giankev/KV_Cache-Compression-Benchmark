@@ -85,10 +85,11 @@ ripetuto, posizione casuale per seed e confronto esatto dei token della
 risposta. Il prompt viene costruito direttamente da token ID e ha esattamente
 la lunghezza richiesta.
 
-Il runner L2 usa `no_compression`, `low_l2`, `random` e `high_l2` con keep ratio
-comune 0.8. Il runner SnapKV usa soltanto `no_compression` e `snapkv`. Entrambi
-aggregano l'accuracy sui dieci seed effettivamente eseguiti e interrompono le
-configurazioni compresse quando la baseline dello stesso prompt fallisce.
+Il runner L2 usa `no_compression`, `low_l2_keep10`, `random_keep10` e
+`high_l2_keep10` con keep ratio fisso 0.10. I tre seed predefiniti producono al
+massimo 12 run. Il runner SnapKV usa soltanto `no_compression` e `snapkv`.
+Entrambi interrompono le configurazioni compresse quando la baseline dello
+stesso prompt fallisce.
 
 La compressione è eseguita una sola volta, dopo il prefill. Lo stack Kaggle è
 fissato in `requirements-kaggle.txt`; `transformers==4.57.6` espone l'API
@@ -97,7 +98,7 @@ fissato in `requirements-kaggle.txt`; `transformers==4.57.6` espone l'API
 ## 9. Limiti
 
 - un solo modello principale;
-- dieci passkey sintetici per lunghezza di contesto;
+- tre passkey sintetici nel benchmark L2 predefinito;
 - compressione esclusivamente post-prefill nel passkey;
 - selezione indipendente per head KV, come nel metodo di riferimento;
 - percorso post-pruning limitato a batch size 1 senza padding e forward da un

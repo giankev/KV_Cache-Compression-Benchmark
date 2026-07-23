@@ -37,7 +37,7 @@ and its greedy cache generation flow in
 - the passkey written twice in the information line;
 - the question at the end of the prompt;
 - exact token match over the answer length;
-- accuracy aggregated over 10 seeds by default.
+- exact-match accuracy aggregated over the seeds that actually run.
 
 The prompt is assembled directly from separately tokenized component IDs. It
 has exactly `context_length` tokens and is never decoded and re-tokenized.
@@ -65,14 +65,22 @@ python scripts/run_snapkv_passkey.py \
 
 ```bash
 python scripts/run_l2_passkey.py \
-  --output-prefix l2_passkey_3b_8k
+  --output-prefix l2_passkey_3b_8k_keep10
 
 python scripts/run_snapkv_passkey.py \
   --output-prefix snapkv_passkey_3b_8k
 ```
 
-The L2 runner evaluates `no_compression`, `low_l2`, `random`, and `high_l2`
-with the same default keep ratio of `0.8`. The SnapKV runner evaluates only
+The fixed L2 experiment evaluates `no_compression`, `low_l2_keep10`,
+`random_keep10`, and `high_l2_keep10` on seeds 0, 1, and 2. Every compressed
+configuration keeps 10% of each non-skipped cache layer:
+
+```text
+3 seeds x 4 configurations = at most 12 runs
+```
+
+The effective number can be lower because a failed baseline skips the three
+compressed configurations for that seed. The SnapKV runner evaluates only
 `no_compression` and `snapkv`, with a 16-token observation window and a
 1024-token target cache by default.
 
@@ -85,7 +93,7 @@ For later experiments, change only the context length and output prefix:
 ```bash
 python scripts/run_l2_passkey.py \
   --context-lengths 16384 \
-  --output-prefix l2_passkey_3b_16k
+  --output-prefix l2_passkey_3b_16k_keep10
 
 python scripts/run_snapkv_passkey.py \
   --context-lengths 16384 \
@@ -125,8 +133,8 @@ method parameters are stored once in
 
 ```bash
 python scripts/plot_retrieval.py \
-  --input-csv results/l2_passkey_3b_8k_raw.csv \
-  --output results/l2_passkey_3b_8k_accuracy.png \
+  --input-csv results/l2_passkey_3b_8k_keep10_raw.csv \
+  --output results/l2_passkey_3b_8k_keep10_accuracy.png \
   --title "L2 passkey retrieval accuracy"
 ```
 

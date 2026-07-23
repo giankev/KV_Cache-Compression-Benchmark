@@ -1,3 +1,5 @@
+"""Plot exact-match passkey accuracy against context length from raw CSV data."""
+
 from __future__ import annotations
 
 import argparse

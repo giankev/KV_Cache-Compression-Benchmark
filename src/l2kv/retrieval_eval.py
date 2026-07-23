@@ -1,3 +1,8 @@
+"""Share prefill, exact decoding, cache metrics, and CSV retrieval results.
+
+Both L2 and SnapKV runners use these functions to keep evaluation identical.
+"""
+
 from __future__ import annotations
 
 import math
@@ -161,6 +166,7 @@ def generate_exact_answer(
             break
 
         lengths_before = tuple(cache_layer_lengths(cache))
+        # Physical pruning never changes the next logical model position.
         position_ids = make_position_ids(logical_position, 1, next_token.device)
         outputs = model(
             input_ids=next_token,
@@ -206,10 +212,6 @@ def assert_cache_capacity(
     lengths = tuple(cache_layer_lengths(cache))
     if not lengths:
         raise AssertionError("The model returned an empty cache")
-    invalid_skips = sorted(set(skip_layers) - set(range(len(lengths))))
-    if invalid_skips:
-        raise ValueError(f"skip layer indices do not exist: {invalid_skips}")
-
     skipped = set(skip_layers)
     for layer_idx, length in enumerate(lengths):
         expected = (

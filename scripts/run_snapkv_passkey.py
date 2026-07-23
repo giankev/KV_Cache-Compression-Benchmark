@@ -1,3 +1,5 @@
+"""Run baseline and SnapKV on the professor-style passkey benchmark."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from l2kv.model_utils import load_model_and_tokenizer
-from l2kv.passkey import PasskeyExample, make_passkey_example
+from l2kv.passkey import make_passkey_example
 from l2kv.retrieval_eval import (
     checkpoint_raw,
     evaluate_plain_or_l2,
@@ -33,25 +35,13 @@ OBSERVATION_WINDOW_SIZE = 16
 TARGET_CACHE_TOKENS = 1024
 POOLING_KERNEL_SIZE = 5
 POOLING_MODE = "max"
+
+# Keep the first two layers intact to match the project comparison protocol.
 SKIP_LAYERS = (0, 1)
 CHUNK_SIZE = 512
 OUTPUT_PREFIX = "snapkv_passkey_3b_8k"
 DTYPE = "auto"
 ATTENTION_IMPLEMENTATION = "eager"
-
-
-def build_example(
-    tokenizer: Any,
-    context_length: int,
-    seed: int,
-    observation_window_size: int = OBSERVATION_WINDOW_SIZE,
-) -> PasskeyExample:
-    return make_passkey_example(
-        tokenizer=tokenizer,
-        context_length=context_length,
-        seed=seed,
-        observation_window_size=observation_window_size,
-    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -94,33 +84,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--output-prefix", default=OUTPUT_PREFIX)
-    args = parser.parse_args(argv)
-
-    if any(length < 1 for length in args.context_lengths):
-        raise ValueError("context_lengths must contain positive integers")
-    if not args.seeds:
-        raise ValueError("seeds must not be empty")
-    if args.observation_window_size < 1:
-        raise ValueError("observation_window_size must be >= 1")
-    if args.target_cache_tokens < args.observation_window_size:
-        raise ValueError(
-            "target_cache_tokens must be at least observation_window_size"
-        )
-    if any(
-        args.target_cache_tokens > length
-        or args.observation_window_size >= length
-        for length in args.context_lengths
-    ):
-        raise ValueError(
-            "SnapKV capacity and observation window must fit every context"
-        )
-    if args.pooling_kernel_size < 1 or args.pooling_kernel_size % 2 == 0:
-        raise ValueError("pooling_kernel_size must be a positive odd integer")
-    if any(layer < 0 for layer in args.skip_layers):
-        raise ValueError("skip_layers must contain non-negative integers")
-    if args.chunk_size < 1:
-        raise ValueError("chunk_size must be >= 1")
-    return args
+    return parser.parse_args(argv)
 
 
 def run_benchmark(
@@ -132,11 +96,11 @@ def run_benchmark(
     rows: list[dict[str, Any]] = []
     for context_length in args.context_lengths:
         for seed in args.seeds:
-            example = build_example(
-                tokenizer,
-                context_length,
-                seed,
-                args.observation_window_size,
+            example = make_passkey_example(
+                tokenizer=tokenizer,
+                context_length=context_length,
+                seed=seed,
+                observation_window_size=args.observation_window_size,
             )
             print(
                 f"no_compression | context={context_length} | seed={seed}"

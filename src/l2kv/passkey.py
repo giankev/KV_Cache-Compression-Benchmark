@@ -1,9 +1,9 @@
+"""Build deterministic exact-token prompts for the l2compress passkey task."""
+
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass
-from numbers import Integral
 from typing import Any
 
 import torch
@@ -54,7 +54,7 @@ def _repeat_to_length(unit_ids: list[int], length: int) -> list[int]:
         return []
     if not unit_ids:
         raise ValueError("The garbage unit produced no token IDs")
-    repeats = math.ceil(length / len(unit_ids))
+    repeats = (length + len(unit_ids) - 1) // len(unit_ids)
     return (unit_ids * repeats)[:length]
 
 
@@ -66,22 +66,12 @@ def make_passkey_example(
 ) -> PasskeyExample:
     """Build an exact-length passkey prompt by concatenating token IDs."""
 
-    if (
-        isinstance(context_length, bool)
-        or not isinstance(context_length, Integral)
-        or context_length < 1
-    ):
-        raise ValueError("context_length must be an integer >= 1")
-    if isinstance(seed, bool) or not isinstance(seed, Integral):
-        raise ValueError("seed must be an integer")
-    if observation_window_size is not None and (
-        isinstance(observation_window_size, bool)
-        or not isinstance(observation_window_size, Integral)
-        or observation_window_size < 1
-    ):
-        raise ValueError("observation_window_size must be an integer >= 1")
+    if context_length <= 0:
+        raise ValueError("context_length must be positive")
+    if observation_window_size is not None and observation_window_size <= 0:
+        raise ValueError("observation_window_size must be positive")
 
-    rng = random.Random(int(seed))
+    rng = random.Random(seed)
     answer_text = str(rng.randint(1, 50000))
     information_text = INFORMATION_TEMPLATE.format(passkey=answer_text)
 
@@ -112,7 +102,7 @@ def make_passkey_example(
         )
 
     fixed_tokens = len(task_ids) + len(information_ids) + len(question_ids)
-    total_garbage_tokens = int(context_length) - fixed_tokens
+    total_garbage_tokens = context_length - fixed_tokens
     if total_garbage_tokens < 0:
         raise ValueError(
             f"context_length={context_length} is too small for the fixed "
@@ -122,8 +112,9 @@ def make_passkey_example(
     prefix_garbage_tokens = rng.randint(0, total_garbage_tokens)
     suffix_garbage_tokens = total_garbage_tokens - prefix_garbage_tokens
     information_token_position = len(task_ids) + prefix_garbage_tokens
-    question_token_position = int(context_length) - len(question_ids)
+    question_token_position = context_length - len(question_ids)
 
+    # Appending the question last keeps it fully inside SnapKV's final window.
     prompt_ids = (
         task_ids
         + _repeat_to_length(garbage_ids, prefix_garbage_tokens)
@@ -148,8 +139,8 @@ def make_passkey_example(
         prompt_ids=tuple(prompt_ids),
         answer_ids=tuple(answer_ids),
         answer_text=answer_text,
-        context_length=int(context_length),
-        seed=int(seed),
+        context_length=context_length,
+        seed=seed,
         actual_depth=actual_depth,
         information_token_position=information_token_position,
         question_token_position=question_token_position,

@@ -1,7 +1,8 @@
+"""Run the fixed keep-10% L2 passkey experiment on three deterministic seeds."""
+
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -13,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from l2kv.model_utils import load_model_and_tokenizer
-from l2kv.passkey import PasskeyExample, make_passkey_example
+from l2kv.passkey import make_passkey_example
 from l2kv.retrieval_eval import (
     checkpoint_raw,
     evaluate_plain_or_l2,
@@ -28,31 +29,21 @@ from l2kv.runtime_metadata import (
 
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 CONTEXT_LENGTHS = (8192,)
-SEEDS = tuple(range(10))
-KEEP_RATIO = 0.8
+SEEDS = (0, 1, 2)
+KEEP_RATIO = 0.10
+
+# Keep the first two layers intact to match the project comparison protocol.
 SKIP_LAYERS = (0, 1)
 CHUNK_SIZE = 512
-OUTPUT_PREFIX = "l2_passkey_3b_8k"
+OUTPUT_PREFIX = "l2_passkey_3b_8k_keep10"
 DTYPE = "auto"
 ATTENTION_IMPLEMENTATION = None
 CONFIGURATIONS = (
     ("no_compression", "none"),
-    ("low_l2", "low_l2"),
-    ("random", "random"),
-    ("high_l2", "high_l2"),
+    ("low_l2_keep10", "low_l2"),
+    ("random_keep10", "random"),
+    ("high_l2_keep10", "high_l2"),
 )
-
-
-def build_example(
-    tokenizer: Any,
-    context_length: int,
-    seed: int,
-) -> PasskeyExample:
-    return make_passkey_example(
-        tokenizer=tokenizer,
-        context_length=context_length,
-        seed=seed,
-    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -65,7 +56,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=CONTEXT_LENGTHS,
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=SEEDS)
-    parser.add_argument("--keep-ratio", type=float, default=KEEP_RATIO)
     parser.add_argument(
         "--skip-layers",
         type=int,
@@ -74,19 +64,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--output-prefix", default=OUTPUT_PREFIX)
-    args = parser.parse_args(argv)
-
-    if any(length < 1 for length in args.context_lengths):
-        raise ValueError("context_lengths must contain positive integers")
-    if not args.seeds:
-        raise ValueError("seeds must not be empty")
-    if not 0 < args.keep_ratio <= 1 or not math.isfinite(args.keep_ratio):
-        raise ValueError("keep_ratio must satisfy 0 < keep_ratio <= 1")
-    if any(layer < 0 for layer in args.skip_layers):
-        raise ValueError("skip_layers must contain non-negative integers")
-    if args.chunk_size < 1:
-        raise ValueError("chunk_size must be >= 1")
-    return args
+    return parser.parse_args(argv)
 
 
 def run_benchmark(
@@ -98,8 +76,29 @@ def run_benchmark(
     rows: list[dict[str, Any]] = []
     for context_length in args.context_lengths:
         for seed in args.seeds:
-            example = build_example(tokenizer, context_length, seed)
-            for config, strategy in CONFIGURATIONS:
+            example = make_passkey_example(tokenizer, context_length, seed)
+            baseline_config, baseline_strategy = CONFIGURATIONS[0]
+            print(
+                f"{baseline_config} | context={context_length} | seed={seed}"
+            )
+            baseline = evaluate_plain_or_l2(
+                model=model,
+                tokenizer=tokenizer,
+                model_name=args.model_name,
+                example=example,
+                config=baseline_config,
+                strategy=baseline_strategy,
+                keep_ratio=KEEP_RATIO,
+                skip_layers=args.skip_layers,
+                chunk_size=args.chunk_size,
+            )
+            rows.append(baseline)
+            checkpoint_raw(rows, raw_path)
+            if not baseline["correct"]:
+                print("Baseline failed; compressed configurations skipped.")
+                continue
+
+            for config, strategy in CONFIGURATIONS[1:]:
                 print(f"{config} | context={context_length} | seed={seed}")
                 row = evaluate_plain_or_l2(
                     model=model,
@@ -108,15 +107,12 @@ def run_benchmark(
                     example=example,
                     config=config,
                     strategy=strategy,
-                    keep_ratio=args.keep_ratio,
+                    keep_ratio=KEEP_RATIO,
                     skip_layers=args.skip_layers,
                     chunk_size=args.chunk_size,
                 )
                 rows.append(row)
                 checkpoint_raw(rows, raw_path)
-                if config == "no_compression" and not row["correct"]:
-                    print("Baseline failed; compressed configurations skipped.")
-                    break
     return checkpoint_raw(rows, raw_path)
 
 
@@ -147,7 +143,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             {
                 "config": config,
                 "strategy": strategy,
-                "keep_ratio": 1.0 if strategy == "none" else args.keep_ratio,
+                "keep_ratio": 1.0 if strategy == "none" else KEEP_RATIO,
             }
             for config, strategy in CONFIGURATIONS
         ],

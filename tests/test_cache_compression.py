@@ -149,25 +149,22 @@ def test_keep_ratio_one_is_an_exact_no_op() -> None:
 
 @pytest.mark.parametrize(
     "keep_ratio",
-    [0.0, -0.1, 1.01, float("nan"), float("inf"), True, "0.5"],
+    [0.0, -0.1, 1.01, float("nan"), float("inf")],
 )
 def test_invalid_keep_ratio_raises_value_error(keep_ratio: Any) -> None:
     with pytest.raises(ValueError):
         compress_cache(FakeCache(_make_layer([1.0, 2.0])), keep_ratio=keep_ratio)
 
 
-@pytest.mark.parametrize("prune_after", [-1, 1.5, True])
-def test_invalid_prune_after_raises_value_error(prune_after: Any) -> None:
+def test_negative_prune_after_raises_value_error() -> None:
     with pytest.raises(ValueError):
         compress_cache(
-            FakeCache(_make_layer([1.0, 2.0])), prune_after=prune_after
+            FakeCache(_make_layer([1.0, 2.0])), prune_after=-1
         )
 
 
-@pytest.mark.parametrize("max_cache_tokens", [0, -1, 1.5, True])
-def test_invalid_max_cache_tokens_raises_value_error(
-    max_cache_tokens: Any,
-) -> None:
+@pytest.mark.parametrize("max_cache_tokens", [0, -1])
+def test_invalid_max_cache_tokens_raises_value_error(max_cache_tokens: int) -> None:
     with pytest.raises(ValueError):
         compress_cache_to_budget(
             FakeCache(_make_layer([1.0, 2.0])),
@@ -214,23 +211,23 @@ def test_invalid_key_value_shapes_raise_value_error(
             compress_cache_to_budget(cache, max_cache_tokens=1)
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        pytest.param(
-            {"seed": 0, "generator": torch.Generator()}, id="seed-and-generator"
-        ),
-        pytest.param({"seed": 1.5}, id="non-integer-seed"),
-        pytest.param({"seed": True}, id="boolean-seed"),
-        pytest.param({"generator": object()}, id="invalid-generator"),
-    ],
-)
-def test_invalid_random_source_raises_value_error(kwargs: dict[str, Any]) -> None:
-    with pytest.raises(ValueError):
+def test_seed_and_generator_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="either seed or generator"):
         compress_cache(
             FakeCache(_make_layer([1.0, 2.0])),
             keep_ratio=0.5,
             prune_after=0,
             strategy="random",
-            **kwargs,
+            seed=0,
+            generator=torch.Generator(),
+        )
+
+
+def test_skip_layers_must_exist() -> None:
+    with pytest.raises(ValueError, match="do not exist"):
+        compress_cache(
+            FakeCache(_make_layer([1.0, 2.0])),
+            keep_ratio=0.5,
+            prune_after=0,
+            skip_layers=(1,),
         )

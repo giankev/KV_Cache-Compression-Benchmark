@@ -1,52 +1,17 @@
+"""Compress a post-prefill KV cache with aligned L2 or random token selection.
+
+Low-L2, high-L2, and random policies always gather matching K/V positions.
+"""
+
 from __future__ import annotations
 
 import math
-from numbers import Integral, Real
 from typing import Any, Literal, Sequence
 
 import torch
 
 CompressionStrategy = Literal["low_l2", "high_l2", "random"]
 _VALID_STRATEGIES = {"low_l2", "high_l2", "random"}
-
-
-def _validate_strategy(strategy: str) -> None:
-    if strategy not in _VALID_STRATEGIES:
-        raise ValueError(f"Unknown strategy: {strategy}")
-
-
-def _validate_keep_ratio(keep_ratio: float) -> None:
-    if (
-        isinstance(keep_ratio, bool)
-        or not isinstance(keep_ratio, Real)
-        or not math.isfinite(float(keep_ratio))
-        or not 0 < float(keep_ratio) <= 1
-    ):
-        raise ValueError("keep_ratio must satisfy 0 < keep_ratio <= 1")
-
-
-def _validate_non_negative_int(value: int, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
-        raise ValueError(f"{name} must be a non-negative integer")
-
-
-def _validate_positive_int(value: int, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
-        raise ValueError(f"{name} must be an integer >= 1")
-
-
-def _validate_random_source(
-    seed: int | None,
-    generator: torch.Generator | None,
-) -> None:
-    if seed is not None and generator is not None:
-        raise ValueError("Pass either seed or generator, not both")
-    if seed is not None and (
-        isinstance(seed, bool) or not isinstance(seed, Integral)
-    ):
-        raise ValueError("seed must be an integer or None")
-    if generator is not None and not isinstance(generator, torch.Generator):
-        raise ValueError("generator must be a torch.Generator or None")
 
 
 def _cache_layers(cache: Any) -> Sequence[Any]:
@@ -81,43 +46,13 @@ def _validate_layer_tensors(
     return tuple(int(size) for size in keys.shape)
 
 
-class _RandomGenerators:
-    """Provide local per-device generators without changing global RNG state."""
-
-    def __init__(
-        self,
-        seed: int | None,
-        generator: torch.Generator | None,
-    ) -> None:
-        self.seed = int(seed) if seed is not None else None
-        self.generator = generator
-        self._by_device: dict[str, torch.Generator] = {}
-
-    def for_device(self, device: torch.device) -> torch.Generator | None:
-        if self.generator is not None:
-            generator_device = torch.device(self.generator.device)
-            if generator_device != device:
-                raise ValueError(
-                    "The supplied generator device must match the cache tensor device; "
-                    f"got generator={generator_device}, cache={device}"
-                )
-            return self.generator
-        if self.seed is None:
-            return None
-
-        key = str(device)
-        if key not in self._by_device:
-            local_generator = torch.Generator(device=device)
-            local_generator.manual_seed(self.seed)
-            self._by_device[key] = local_generator
-        return self._by_device[key]
-
-
 def _select_indices(
     keys: torch.Tensor,
     tokens_to_keep: int,
     strategy: CompressionStrategy,
-    random_generators: _RandomGenerators,
+    seed: int | None,
+    generator: torch.Generator | None,
+    generators_by_device: dict[str, torch.Generator],
 ) -> torch.Tensor:
     batch, heads, sequence, _ = keys.shape
 
@@ -128,11 +63,24 @@ def _select_indices(
         scores = keys.float().square().sum(dim=-1)
         largest = True
     else:
+        local_generator = generator
+        if local_generator is not None:
+            if torch.device(local_generator.device) != keys.device:
+                raise ValueError(
+                    "The generator and cache tensor must be on the same device"
+                )
+        elif seed is not None:
+            device_key = str(keys.device)
+            local_generator = generators_by_device.get(device_key)
+            if local_generator is None:
+                local_generator = torch.Generator(device=keys.device)
+                local_generator.manual_seed(seed)
+                generators_by_device[device_key] = local_generator
         scores = torch.rand(
             (batch, heads, sequence),
             dtype=torch.float32,
             device=keys.device,
-            generator=random_generators.for_device(keys.device),
+            generator=local_generator,
         )
         largest = False
 
@@ -143,6 +91,7 @@ def _select_indices(
         largest=largest,
         sorted=False,
     ).indices
+    # Restore chronological order after score-based top-k selection.
     return keep_idx.sort(dim=-1).values
 
 
@@ -180,15 +129,23 @@ def compress_cache(
     caller wants to manage the random stream.
     """
 
-    _validate_keep_ratio(keep_ratio)
-    _validate_non_negative_int(prune_after, "prune_after")
-    _validate_strategy(strategy)
-    _validate_random_source(seed, generator)
+    if not 0 < keep_ratio <= 1:
+        raise ValueError("keep_ratio must satisfy 0 < keep_ratio <= 1")
+    if prune_after < 0:
+        raise ValueError("prune_after must be non-negative")
+    if strategy not in _VALID_STRATEGIES:
+        raise ValueError(f"Unknown strategy: {strategy}")
+    if seed is not None and generator is not None:
+        raise ValueError("Pass either seed or generator, not both")
 
     skipped = set(skip_layers)
-    random_generators = _RandomGenerators(seed, generator)
+    layers = _cache_layers(cache)
+    invalid_skips = sorted(skipped - set(range(len(layers))))
+    if invalid_skips:
+        raise ValueError(f"skip layer indices do not exist: {invalid_skips}")
+    generators_by_device: dict[str, torch.Generator] = {}
 
-    for layer_idx, layer in enumerate(_cache_layers(cache)):
+    for layer_idx, layer in enumerate(layers):
         keys = getattr(layer, "keys", None)
         values = getattr(layer, "values", None)
         _, _, sequence, _ = _validate_layer_tensors(keys, values, layer_idx)
@@ -196,12 +153,14 @@ def compress_cache(
         if layer_idx in skipped or sequence < prune_after or keep_ratio == 1:
             continue
 
-        tokens_to_keep = min(math.ceil(float(keep_ratio) * sequence), sequence)
+        tokens_to_keep = min(math.ceil(keep_ratio * sequence), sequence)
         keep_idx = _select_indices(
             keys,
             tokens_to_keep=tokens_to_keep,
             strategy=strategy,
-            random_generators=random_generators,
+            seed=seed,
+            generator=generator,
+            generators_by_device=generators_by_device,
         )
         layer.keys = _gather_tokens(keys, keep_idx)
         layer.values = _gather_tokens(values, keep_idx)
@@ -227,14 +186,21 @@ def compress_cache_to_budget(
     rules are identical to :func:`compress_cache`.
     """
 
-    _validate_positive_int(max_cache_tokens, "max_cache_tokens")
-    _validate_strategy(strategy)
-    _validate_random_source(seed, generator)
+    if max_cache_tokens <= 0:
+        raise ValueError("max_cache_tokens must be positive")
+    if strategy not in _VALID_STRATEGIES:
+        raise ValueError(f"Unknown strategy: {strategy}")
+    if seed is not None and generator is not None:
+        raise ValueError("Pass either seed or generator, not both")
 
     skipped = set(skip_layers)
-    random_generators = _RandomGenerators(seed, generator)
+    layers = _cache_layers(cache)
+    invalid_skips = sorted(skipped - set(range(len(layers))))
+    if invalid_skips:
+        raise ValueError(f"skip layer indices do not exist: {invalid_skips}")
+    generators_by_device: dict[str, torch.Generator] = {}
 
-    for layer_idx, layer in enumerate(_cache_layers(cache)):
+    for layer_idx, layer in enumerate(layers):
         keys = getattr(layer, "keys", None)
         values = getattr(layer, "values", None)
         _, _, sequence, _ = _validate_layer_tensors(keys, values, layer_idx)
@@ -246,7 +212,9 @@ def compress_cache_to_budget(
             keys,
             tokens_to_keep=max_cache_tokens,
             strategy=strategy,
-            random_generators=random_generators,
+            seed=seed,
+            generator=generator,
+            generators_by_device=generators_by_device,
         )
         layer.keys = _gather_tokens(keys, keep_idx)
         layer.values = _gather_tokens(values, keep_idx)

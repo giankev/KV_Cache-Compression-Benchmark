@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from scripts import run_l2_passkey, run_snapkv_passkey
 
 
@@ -30,8 +32,13 @@ class _Tokenizer:
 
 def test_l2_and_snapkv_build_identical_prompts() -> None:
     tokenizer = _Tokenizer()
-    l2_example = run_l2_passkey.build_example(tokenizer, 128, 4)
-    snapkv_example = run_snapkv_passkey.build_example(tokenizer, 128, 4, 16)
+    l2_example = run_l2_passkey.make_passkey_example(tokenizer, 128, 4)
+    snapkv_example = run_snapkv_passkey.make_passkey_example(
+        tokenizer,
+        128,
+        4,
+        observation_window_size=16,
+    )
 
     assert l2_example.prompt_ids == snapkv_example.prompt_ids
     assert l2_example.answer_ids == snapkv_example.answer_ids
@@ -43,15 +50,21 @@ def test_runner_defaults_and_configuration_sets() -> None:
     snapkv_args = run_snapkv_passkey.parse_args([])
 
     assert l2_args.context_lengths == (8192,)
-    assert l2_args.seeds == tuple(range(10))
-    assert l2_args.keep_ratio == 0.8
+    assert l2_args.seeds == (0, 1, 2)
+    assert run_l2_passkey.KEEP_RATIO == 0.10
     assert [config for config, _ in run_l2_passkey.CONFIGURATIONS] == [
         "no_compression",
-        "low_l2",
-        "random",
-        "high_l2",
+        "low_l2_keep10",
+        "random_keep10",
+        "high_l2_keep10",
     ]
+    assert len(l2_args.seeds) * len(run_l2_passkey.CONFIGURATIONS) == 12
     assert snapkv_args.context_lengths == (8192,)
     assert snapkv_args.seeds == tuple(range(10))
     assert snapkv_args.observation_window_size == 16
     assert snapkv_args.target_cache_tokens == 1024
+
+
+def test_l2_keep_ratio_is_not_configurable_from_the_cli() -> None:
+    with pytest.raises(SystemExit):
+        run_l2_passkey.parse_args(["--keep-ratio", "0.5"])

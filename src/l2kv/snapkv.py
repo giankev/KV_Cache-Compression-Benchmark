@@ -1,3 +1,5 @@
+"""Implement SnapKV attention scoring and post-prefill cache compression."""
+
 from __future__ import annotations
 
 import math

@@ -99,9 +99,9 @@ def test_summary_accuracy_uses_only_rows_that_exist() -> None:
 
 
 def test_l2_and_snapkv_capacity_contracts() -> None:
-    assert target_capacity(8192, 0.8) == 6553
-    l2_cache = _Cache(8192, 8192, 6553)
+    assert target_capacity(8192, 0.10) == 819
+    l2_cache = _Cache(8192, 8192, 819)
     snapkv_cache = _Cache(8192, 8192, 1024)
 
-    assert_cache_capacity(l2_cache, 8192, 6553, (0, 1), compressed=True)
+    assert_cache_capacity(l2_cache, 8192, 819, (0, 1), compressed=True)
     assert_cache_capacity(snapkv_cache, 8192, 1024, (0, 1), compressed=True)
