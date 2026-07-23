@@ -55,6 +55,32 @@ def _correct_as_binary(correct: pd.Series) -> pd.Series:
     return binary.astype(float)
 
 
+def _skipped_as_boolean(skipped: pd.Series) -> pd.Series:
+    text_values = skipped.astype("string").str.strip().str.lower()
+    text_binary = text_values.map(
+        {
+            "true": 1.0,
+            "false": 0.0,
+            "1": 1.0,
+            "0": 0.0,
+            "1.0": 1.0,
+            "0.0": 0.0,
+        }
+    )
+    numeric = pd.to_numeric(skipped, errors="coerce")
+    binary = text_binary.fillna(numeric)
+    binary.loc[skipped.isna()] = 0.0
+
+    invalid = binary.isna() | ~binary.isin([0.0, 1.0])
+    if invalid.any():
+        examples = skipped[invalid].astype(str).drop_duplicates().head(5).tolist()
+        raise ValueError(
+            "Column 'skipped_due_to_baseline_failure' must contain boolean "
+            f"or 0/1 values; invalid values include: {examples}"
+        )
+    return binary.astype(bool)
+
+
 def load_results(input_csv: Path) -> pd.DataFrame:
     """Load passkey raw results and validate their required columns."""
 
@@ -67,7 +93,13 @@ def build_accuracy_matrix(results: pd.DataFrame) -> pd.DataFrame:
     """Return mean accuracy indexed by configuration and numeric depth."""
 
     _validate_columns(results)
-    prepared = results.loc[:, ["config", "depth_target", "correct"]].copy()
+    executed = results
+    if "skipped_due_to_baseline_failure" in results.columns:
+        skipped = _skipped_as_boolean(
+            results["skipped_due_to_baseline_failure"]
+        )
+        executed = results.loc[~skipped]
+    prepared = executed.loc[:, ["config", "depth_target", "correct"]].copy()
 
     if prepared["config"].isna().any():
         raise ValueError("Column 'config' must not contain missing values")

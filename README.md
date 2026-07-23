@@ -98,7 +98,97 @@ The script prints the aggregated accuracy table before saving the PNG. If more
 than one seed is present, each cell contains the mean accuracy for that
 configuration and depth.
 
-## SnapKV key-value retrieval benchmark
+## Versioned key-value retrieval prompt
+
+The final L2 and SnapKV retrieval scripts both use the same deterministic
+`explicit_v2` prompt from `src/l2kv/kv_retrieval.py`. It starts with a short
+instruction, uses uniform records such as
+`Record: key=gentle-acmi; value=38733.`, and ends with the query. Padding is
+nonnumeric, appears before the query, and the complete query must fit inside
+the requested observation window. Prompt components are concatenated directly
+as token IDs without decode/re-encode.
+
+The original prompt remains available as `prompt_style=legacy`, and legacy
+scripts keep using it by default. For the same context length, depth, seed and
+prompt style, the two final runners generate identical prompt IDs and targets.
+
+### Baseline gate and incremental checkpoints
+
+Both final runners execute `no_compression` first for each prompt. By default,
+if that baseline is wrong, compressed policies for that prompt are not run and
+their raw rows are marked `skipped_due_to_baseline_failure`. Disable this gate
+with `--no-require-baseline-success` when an ungated diagnostic is desired.
+The raw CSV is rewritten after every completed or gated row, so an interrupted
+Kaggle session retains all results collected up to that point.
+
+## L2-norm key-value retrieval
+
+`scripts/run_l2_kv_retrieval.py` contains only `no_compression`, low-L2,
+random and high-L2 policies. It does not collect attention weights or execute
+SnapKV. The default run count is:
+
+```text
+1 context * 3 depths * 1 seed * 5 configurations = 15 runs
+```
+
+Run the final 3B/8k L2 benchmark on Kaggle:
+
+```python
+!python scripts/run_l2_kv_retrieval.py \
+  --output-prefix l2_kv_retrieval_3b_8k
+```
+
+Generate its configuration-by-depth heatmap from the raw CSV:
+
+```python
+!python scripts/plot_passkey_heatmap.py \
+  --input-csv results/l2_kv_retrieval_3b_8k_raw.csv \
+  --output results/l2_kv_retrieval_3b_8k_heatmap.png \
+  --title "L2-norm key-value retrieval accuracy by depth"
+```
+
+Rows suppressed by the baseline gate are ignored by the heatmap rather than
+being counted as incorrect predictions.
+
+## SnapKV key-value retrieval
+
+`scripts/run_snapkv_kv_retrieval.py` contains only `no_compression` and one
+fixed SnapKV configuration. Its paper-inspired defaults use an observation
+window of 16 tokens, pooling kernel 5 and an absolute cache capacity of 1024
+tokens. The default run count is three baselines plus three SnapKV runs:
+
+```text
+3 + 3 = 6 runs
+```
+
+At the default 8192-token context, the retained prefix is `1024 - 16 = 1008`
+tokens followed by the untouched 16-token observation window. Thus 1024 is
+12.5% only when the prompt length is 8192; the benchmark reports the absolute
+capacity and the effective ratio separately for closer alignment with the
+paper. `--keep-ratio` remains available, but it is mutually exclusive with
+`--target-cache-tokens` and does not create a parameter grid.
+
+Run the final 3B/8k SnapKV benchmark on Kaggle:
+
+```python
+!python scripts/run_snapkv_kv_retrieval.py \
+  --target-cache-tokens 1024 \
+  --output-prefix snapkv_kv_retrieval_3b_8k
+```
+
+Generate the dedicated heatmap, including the fixed SnapKV parameters in its
+subtitle:
+
+```python
+!python scripts/plot_snapkv_kv_retrieval.py \
+  --input-csv results/snapkv_kv_retrieval_3b_8k_raw.csv \
+  --output results/snapkv_kv_retrieval_3b_8k_heatmap.png
+```
+
+## Legacy mixed key-value retrieval benchmark
+
+The earlier mixed runner remains available unchanged for reproducing previous
+experiments. It combines L2-family policies and SnapKV in one invocation.
 
 SnapKV uses attention from a final observation window to select important
 prefix positions independently for each native KV head. The implementation is
@@ -263,6 +353,9 @@ model. The smoke test downloads `Qwen/Qwen2.5-0.5B-Instruct`.
 - `src/l2kv/alr.py` - exploratory ALR calculation.
 - `scripts/run_basic_passkey.py` - main passkey benchmark.
 - `scripts/run_kv_retrieval.py` - SnapKV and baseline retrieval benchmark.
+- `scripts/run_l2_kv_retrieval.py` - final L2-only retrieval benchmark.
+- `scripts/run_snapkv_kv_retrieval.py` - fixed-capacity SnapKV benchmark.
+- `scripts/plot_snapkv_kv_retrieval.py` - fixed SnapKV accuracy heatmap.
 - `scripts/run_snapkv_ablation.py` - controlled SnapKV-only ablation grid.
 - `scripts/plot_snapkv_ablation.py` - dedicated ablation heatmap.
 - `scripts/run_online_lm.py` - online WikiText benchmark.

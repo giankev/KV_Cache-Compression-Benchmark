@@ -9,7 +9,6 @@ import torch
 from .cache_metrics import cache_layer_lengths
 from .kv_retrieval import extract_first_five_digit_number
 from .position_utils import make_cache_position, make_position_ids
-from .snapkv import prefill_and_score_snapkv
 
 
 @dataclass(frozen=True)
@@ -101,6 +100,10 @@ def prefill_snapkv(
 ) -> PrefillState:
     """Prefill one prompt while collecting per-layer SnapKV prefix scores."""
 
+    # Keep the plain-prefill evaluation path independent from the optional
+    # attention-scoring implementation until this function is actually used.
+    from .snapkv import prefill_and_score_snapkv
+
     result = prefill_and_score_snapkv(
         model=model,
         prompt_ids=prompt_ids,
@@ -149,6 +152,8 @@ def generate_greedy(
     last_logits: torch.Tensor,
     logical_position: int,
     max_new_tokens: int,
+    *,
+    validate_cache_growth: bool = False,
 ) -> tuple[str, str, Any]:
     """Greedily decode until EOS, a five-digit answer, or the token limit."""
 
@@ -176,6 +181,11 @@ def generate_greedy(
             1,
             next_token.device,
         )
+        lengths_before = (
+            tuple(cache_layer_lengths(cache))
+            if validate_cache_growth
+            else ()
+        )
         outputs = model(
             input_ids=next_token,
             past_key_values=cache,
@@ -187,6 +197,14 @@ def generate_greedy(
             logits_to_keep=1,
         )
         cache = outputs.past_key_values
+        if validate_cache_growth:
+            lengths_after = tuple(cache_layer_lengths(cache))
+            expected_lengths = tuple(length + 1 for length in lengths_before)
+            if lengths_after != expected_lengths:
+                raise AssertionError(
+                    "Every cache layer must add exactly one token per decode "
+                    f"step; before={lengths_before}, after={lengths_after}"
+                )
         logical_position += 1
         next_token = outputs.logits[:, -1, :].argmax(
             dim=-1,

@@ -16,6 +16,12 @@ def test_build_accuracy_matrix_orders_and_aggregates_results() -> None:
             {"config": "no_compression", "depth_target": 0.25, "correct": True},
             {"config": "no_compression", "depth_target": 0.25, "correct": False},
             {"config": "no_compression", "depth_target": 0.50, "correct": 1},
+            {
+                "config": "low_l2_keep10",
+                "depth_target": 0.50,
+                "correct": pd.NA,
+                "skipped_due_to_baseline_failure": True,
+            },
         ]
     )
 

@@ -33,6 +33,16 @@ _RECORD_TEMPLATE = "Record {key}: REGISTER_CONTENT is {value}.\n"
 _QUESTION_TEMPLATE = "\n{key} REGISTER_CONTENT? 5 digits:\n"
 _PADDING_TEXT = "Background context remains irrelevant.\n"
 
+_EXPLICIT_V2_INSTRUCTION = (
+    "Instruction: Each record associates one key with one five-digit value. "
+    "Return only the value associated with the requested key.\n\n"
+)
+_EXPLICIT_V2_RECORD_TEMPLATE = "Record: key={key}; value={value}.\n"
+_EXPLICIT_V2_QUESTION_TEMPLATE = "\nValue for {key}? Five digits:"
+_EXPLICIT_V2_PADDING_TEXT = "Background context remains irrelevant.\n"
+
+PROMPT_STYLES = ("legacy", "explicit_v2")
+
 
 @dataclass(frozen=True)
 class KVRecord:
@@ -176,6 +186,22 @@ def _make_record(
     return value_text, text, token_ids
 
 
+def _make_explicit_v2_record(
+    tokenizer: Any,
+    key: str,
+    value: int,
+) -> tuple[str, str, tuple[int, ...]]:
+    value_text = f"{value:05d}"
+    text = _EXPLICIT_V2_RECORD_TEMPLATE.format(
+        key=key,
+        value=value_text,
+    )
+    token_ids = tuple(_encode_without_special_tokens(tokenizer, text))
+    if not token_ids:
+        raise ValueError("A key-value record produced no token IDs")
+    return value_text, text, token_ids
+
+
 def _repeat_token_ids(unit_ids: list[int], length: int) -> list[int]:
     if length == 0:
         return []
@@ -192,22 +218,175 @@ def _target_index(num_records: int, depth: float) -> int:
     return min(int(math.floor(scaled + 0.5)), num_records - 1)
 
 
+def _make_explicit_v2_prompt(
+    tokenizer: Any,
+    target_tokens: int,
+    seed: int,
+    depth: float,
+    observation_window_size: int,
+) -> KVRetrievalPrompt:
+    """Build the controlled ``explicit_v2`` retrieval prompt."""
+
+    _validate_prompt_arguments(
+        target_tokens=target_tokens,
+        seed=seed,
+        depth=depth,
+        observation_window_size=observation_window_size,
+    )
+
+    instruction_ids = tuple(
+        _encode_without_special_tokens(tokenizer, _EXPLICIT_V2_INSTRUCTION)
+    )
+    if not instruction_ids:
+        raise ValueError("The explicit_v2 instruction produced no token IDs")
+
+    rng = random.Random(int(seed))
+    candidate_count = min(int(target_tokens), 90_000)
+    key_indices = list(range(candidate_count))
+    rng.shuffle(key_indices)
+    values = rng.sample(range(10_000, 100_000), k=candidate_count)
+
+    target_key = _make_key(key_indices[0])
+    question_text = _EXPLICIT_V2_QUESTION_TEMPLATE.format(key=target_key)
+    question_ids = tuple(
+        _encode_without_special_tokens(tokenizer, question_text)
+    )
+    if not question_ids:
+        raise ValueError("The final retrieval question produced no token IDs")
+    if len(question_ids) > observation_window_size:
+        raise ValueError(
+            "observation_window_size is too small to contain the final question: "
+            f"question has {len(question_ids)} tokens, window has "
+            f"{observation_window_size}"
+        )
+
+    records_budget = (
+        int(target_tokens) - len(instruction_ids) - len(question_ids)
+    )
+    pending_records: list[tuple[str, str, str, tuple[int, ...]]] = []
+    used_record_tokens = 0
+
+    for key_index, value in zip(key_indices, values, strict=True):
+        key = _make_key(key_index)
+        value_text, record_text, record_ids = _make_explicit_v2_record(
+            tokenizer=tokenizer,
+            key=key,
+            value=value,
+        )
+        if used_record_tokens + len(record_ids) > records_budget:
+            break
+        pending_records.append((key, value_text, record_text, record_ids))
+        used_record_tokens += len(record_ids)
+
+    if len(pending_records) < 2:
+        raise ValueError(
+            "target_tokens is too small for the explicit_v2 instruction, two "
+            "complete records, and the final question"
+        )
+
+    target_record_index = _target_index(len(pending_records), float(depth))
+    target_record = pending_records.pop(0)
+    pending_records.insert(target_record_index, target_record)
+
+    record_ids_flat: list[int] = []
+    records: list[KVRecord] = []
+    for key, value_text, record_text, record_ids in pending_records:
+        token_position = len(instruction_ids) + len(record_ids_flat)
+        records.append(
+            KVRecord(
+                key=key,
+                value=value_text,
+                text=record_text,
+                token_ids=record_ids,
+                token_position=token_position,
+            )
+        )
+        record_ids_flat.extend(record_ids)
+
+    padding_length = records_budget - len(record_ids_flat)
+    padding_ids = _repeat_token_ids(
+        _encode_without_special_tokens(tokenizer, _EXPLICIT_V2_PADDING_TEXT),
+        padding_length,
+    )
+    question_token_position = (
+        len(instruction_ids) + len(record_ids_flat) + len(padding_ids)
+    )
+    prompt_ids = tuple(
+        list(instruction_ids)
+        + record_ids_flat
+        + padding_ids
+        + list(question_ids)
+    )
+
+    if len(prompt_ids) != target_tokens:
+        raise AssertionError(
+            f"Retrieval prompt length mismatch: {len(prompt_ids)} != "
+            f"{target_tokens}"
+        )
+    if prompt_ids[question_token_position:] != question_ids:
+        raise AssertionError("The final question must end the retrieval prompt")
+    if question_token_position < target_tokens - observation_window_size:
+        raise AssertionError("The final question is outside the observation window")
+
+    target_value = target_record[1]
+    target_record_token_position = records[
+        target_record_index
+    ].token_position
+    record_keys = [record.key for record in records]
+    record_values = [record.value for record in records]
+    if len(record_keys) != len(set(record_keys)):
+        raise AssertionError("Generated record keys are not unique")
+    if len(record_values) != len(set(record_values)):
+        raise AssertionError("Generated record values are not unique")
+    if record_keys.count(target_key) != 1:
+        raise AssertionError("The target key must occur in exactly one record")
+    if record_values.count(target_value) != 1:
+        raise AssertionError("The target value must occur in exactly one record")
+
+    return KVRetrievalPrompt(
+        prompt_ids=prompt_ids,
+        question_ids=question_ids,
+        records=tuple(records),
+        target_key=target_key,
+        target_value=target_value,
+        target_record_index=target_record_index,
+        target_record_token_position=target_record_token_position,
+        question_token_position=question_token_position,
+        depth_target=float(depth),
+        observation_window_size=int(observation_window_size),
+    )
+
+
 def make_kv_retrieval_prompt(
     tokenizer: Any,
     target_tokens: int = 2048,
     seed: int = 0,
     depth: float = 0.5,
     observation_window_size: int = 64,
+    prompt_style: str = "legacy",
 ) -> KVRetrievalPrompt:
-    """Build an exact-length LongEval-Lines-style retrieval prompt.
+    """Build an exact-length, versioned key-value retrieval prompt.
 
-    Every complete distractor has the same format as the target record. Text
-    components are tokenized once and then concatenated as token IDs; the
-    function never decodes and re-encodes the prompt. Any small residual budget
-    is filled with nonnumeric background-token IDs immediately before the final
-    question. The whole question is therefore inside the observation window.
-    All randomness is local to ``seed``.
+    ``legacy`` preserves the original LongEval-Lines-style benchmark exactly.
+    ``explicit_v2`` uses explicit, uniform records and a shorter final query.
+    Both styles concatenate independently tokenized components as token IDs;
+    the complete prompt is never decoded and re-encoded.
     """
+
+    if prompt_style == "explicit_v2":
+        return _make_explicit_v2_prompt(
+            tokenizer=tokenizer,
+            target_tokens=target_tokens,
+            seed=seed,
+            depth=depth,
+            observation_window_size=observation_window_size,
+        )
+    if prompt_style != "legacy":
+        supported = ", ".join(PROMPT_STYLES)
+        raise ValueError(
+            f"Unknown prompt_style {prompt_style!r}; expected one of: "
+            f"{supported}"
+        )
 
     _validate_prompt_arguments(
         target_tokens=target_tokens,
