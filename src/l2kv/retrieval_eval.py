@@ -34,6 +34,9 @@ RAW_COLUMNS = [
     "target",
     "prediction",
     "correct",
+    "cache_before_mb",
+    "cache_after_mb",
+    "memory_saved_mb",
     "memory_saved_percent",
     "elapsed_seconds",
 ]
@@ -44,10 +47,19 @@ SUMMARY_COLUMNS = [
     "context_length",
     "keep_ratio",
     "target_cache_tokens",
-    "observation_window_size",
-    "pooling_kernel_size",
-    "pooling_mode",
     "num_examples",
+    "accuracy",
+    "mean_cache_before_mb",
+    "mean_cache_after_mb",
+    "mean_memory_saved_mb",
+    "mean_memory_saved_percent",
+    "mean_elapsed_seconds",
+]
+CONSOLE_SUMMARY_COLUMNS = [
+    "config",
+    "keep_ratio",
+    "mean_cache_after_mb",
+    "mean_memory_saved_mb",
     "accuracy",
     "mean_memory_saved_percent",
     "mean_elapsed_seconds",
@@ -214,6 +226,19 @@ def target_capacity(prompt_length: int, keep_ratio: float) -> int:
     return math.floor(prompt_length * keep_ratio)
 
 
+def cache_memory_savings(
+    cache_before_mb: float,
+    cache_after_mb: float,
+) -> tuple[float, float]:
+    memory_saved_mb = cache_before_mb - cache_after_mb
+    memory_saved_percent = (
+        100.0 * (1.0 - cache_after_mb / cache_before_mb)
+        if cache_before_mb
+        else 0.0
+    )
+    return memory_saved_mb, memory_saved_percent
+
+
 def assert_cache_capacity(
     cache: Any,
     prompt_length: int,
@@ -250,6 +275,9 @@ def _finish_result(
     pooling_kernel_size: int | None,
     pooling_mode: str | None,
     skip_layers: Sequence[int],
+    cache_before_mb: float,
+    cache_after_mb: float,
+    memory_saved_mb: float,
     memory_saved_percent: float,
     elapsed_seconds: float,
     generated_ids: Sequence[int],
@@ -271,6 +299,9 @@ def _finish_result(
         "target": example.answer_text,
         "prediction": prediction,
         "correct": exact_token_match(generated_ids, example.answer_ids),
+        "cache_before_mb": cache_before_mb,
+        "cache_after_mb": cache_after_mb,
+        "memory_saved_mb": memory_saved_mb,
         "memory_saved_percent": memory_saved_percent,
         "elapsed_seconds": elapsed_seconds,
     }
@@ -306,7 +337,7 @@ def evaluate_plain_or_l2(
     if logical_position != example.context_length:
         raise AssertionError("Logical position after prefill must equal prompt length")
 
-    cache_mb_before = kv_cache_size_mb(cache)
+    cache_before_mb = kv_cache_size_mb(cache)
     compressed = strategy != "none"
     capacity = (
         target_capacity(example.context_length, keep_ratio)
@@ -323,7 +354,7 @@ def evaluate_plain_or_l2(
             skip_layers=skip_layers,
             seed=example.seed,
         )
-    cache_mb_after = kv_cache_size_mb(cache)
+    cache_after_mb = kv_cache_size_mb(cache)
     assert_cache_capacity(
         cache,
         example.context_length,
@@ -331,10 +362,9 @@ def evaluate_plain_or_l2(
         skip_layers,
         compressed,
     )
-    memory_saved_percent = (
-        100.0 * (1.0 - cache_mb_after / cache_mb_before)
-        if compressed and cache_mb_before
-        else 0.0
+    memory_saved_mb, memory_saved_percent = cache_memory_savings(
+        cache_before_mb,
+        cache_after_mb,
     )
 
     generated_ids, prediction, _, cache = generate_exact_answer(
@@ -360,6 +390,9 @@ def evaluate_plain_or_l2(
         pooling_kernel_size=pooling_kernel_size,
         pooling_mode=pooling_mode,
         skip_layers=skip_layers,
+        cache_before_mb=cache_before_mb,
+        cache_after_mb=cache_after_mb,
+        memory_saved_mb=memory_saved_mb,
         memory_saved_percent=memory_saved_percent,
         elapsed_seconds=elapsed_seconds,
         generated_ids=generated_ids,
@@ -405,7 +438,7 @@ def evaluate_snapkv(
         compressed=False,
     )
 
-    cache_mb_before = kv_cache_size_mb(cache)
+    cache_before_mb = kv_cache_size_mb(cache)
     cache = compress_snapkv_cache(
         cache=cache,
         scores_by_layer=scores_by_layer,
@@ -415,7 +448,7 @@ def evaluate_snapkv(
         pooling_mode=pooling_mode,
         skip_layers=skip_layers,
     )
-    cache_mb_after = kv_cache_size_mb(cache)
+    cache_after_mb = kv_cache_size_mb(cache)
     assert_cache_capacity(
         cache,
         example.context_length,
@@ -424,10 +457,9 @@ def evaluate_snapkv(
         compressed=True,
     )
     del scores_by_layer
-    memory_saved_percent = (
-        100.0 * (1.0 - cache_mb_after / cache_mb_before)
-        if cache_mb_before
-        else 0.0
+    memory_saved_mb, memory_saved_percent = cache_memory_savings(
+        cache_before_mb,
+        cache_after_mb,
     )
     generated_ids, prediction, _, cache = generate_exact_answer(
         model,
@@ -452,6 +484,9 @@ def evaluate_snapkv(
         pooling_kernel_size=pooling_kernel_size,
         pooling_mode=pooling_mode,
         skip_layers=skip_layers,
+        cache_before_mb=cache_before_mb,
+        cache_after_mb=cache_after_mb,
+        memory_saved_mb=memory_saved_mb,
         memory_saved_percent=memory_saved_percent,
         elapsed_seconds=elapsed_seconds,
         generated_ids=generated_ids,
@@ -476,12 +511,17 @@ def print_result(row: Mapping[str, Any]) -> None:
     )
 
 
+def print_summary(summary_df: pd.DataFrame) -> None:
+    print("\nSummary:")
+    print(summary_df.loc[:, CONSOLE_SUMMARY_COLUMNS].to_string(index=False))
+
+
 def summarize_results(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df.empty:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
     summary = (
         raw_df.groupby(
-            SUMMARY_COLUMNS[:9],
+            SUMMARY_COLUMNS[:6],
             sort=False,
             as_index=False,
             dropna=False,
@@ -489,6 +529,9 @@ def summarize_results(raw_df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             num_examples=("correct", "size"),
             accuracy=("correct", "mean"),
+            mean_cache_before_mb=("cache_before_mb", "mean"),
+            mean_cache_after_mb=("cache_after_mb", "mean"),
+            mean_memory_saved_mb=("memory_saved_mb", "mean"),
             mean_memory_saved_percent=("memory_saved_percent", "mean"),
             mean_elapsed_seconds=("elapsed_seconds", "mean"),
         )

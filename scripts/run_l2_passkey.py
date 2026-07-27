@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -19,6 +20,7 @@ from l2kv.retrieval_eval import (
     checkpoint_raw,
     evaluate_plain_or_l2,
     print_result,
+    print_summary,
     summarize_results,
 )
 from l2kv.runtime_metadata import (
@@ -148,11 +150,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "keep_ratio": (
                     1.0 if strategy == "none" else args.keep_ratio
                 ),
-                "target_cache_tokens": (
-                    "context_length"
-                    if strategy == "none"
-                    else "floor(context_length * keep_ratio)"
-                ),
+                "target_cache_tokens": {
+                    str(context_length): (
+                        context_length
+                        if strategy == "none"
+                        else math.floor(context_length * args.keep_ratio)
+                    )
+                    for context_length in args.context_lengths
+                },
             }
             for config, strategy in CONFIGURATIONS
         ],
@@ -169,8 +174,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     raw_df = run_benchmark(model, tokenizer, args, raw_path)
     summary_df = summarize_results(raw_df)
     summary_df.to_csv(summary_path, index=False)
-    print("\nSummary:")
-    print(summary_df.to_string(index=False))
+    print_summary(summary_df)
     print(f"\nSaved {raw_path}")
     print(f"Saved {summary_path}")
     print(f"Saved {metadata_path}")

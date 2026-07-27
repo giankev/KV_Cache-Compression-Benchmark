@@ -12,6 +12,7 @@ from l2kv.retrieval_eval import (
     RAW_COLUMNS,
     SUMMARY_COLUMNS,
     assert_cache_capacity,
+    cache_memory_savings,
     exact_token_match,
     generate_exact_answer,
     print_result,
@@ -93,6 +94,9 @@ def test_summary_accuracy_uses_only_rows_that_exist() -> None:
             "pooling_kernel_size": [None, None, 5],
             "pooling_mode": [None, None, "max"],
             "correct": [True, False, True],
+            "cache_before_mb": [100.0, 100.0, 100.0],
+            "cache_after_mb": [80.0, 78.0, 20.0],
+            "memory_saved_mb": [20.0, 22.0, 80.0],
             "memory_saved_percent": [20.0, 22.0, 80.0],
             "elapsed_seconds": [1.0, 3.0, 2.0],
         }
@@ -101,8 +105,28 @@ def test_summary_accuracy_uses_only_rows_that_exist() -> None:
     summary = summarize_results(raw).set_index("config")
 
     assert list(summarize_results(raw).columns) == SUMMARY_COLUMNS
+    assert SUMMARY_COLUMNS == [
+        "model_name",
+        "method",
+        "config",
+        "context_length",
+        "keep_ratio",
+        "target_cache_tokens",
+        "num_examples",
+        "accuracy",
+        "mean_cache_before_mb",
+        "mean_cache_after_mb",
+        "mean_memory_saved_mb",
+        "mean_memory_saved_percent",
+        "mean_elapsed_seconds",
+    ]
     assert summary.loc["low_l2", "num_examples"] == 2
     assert summary.loc["low_l2", "accuracy"] == pytest.approx(0.5)
+    assert summary.loc["low_l2", "mean_cache_before_mb"] == pytest.approx(
+        100.0
+    )
+    assert summary.loc["low_l2", "mean_cache_after_mb"] == pytest.approx(79.0)
+    assert summary.loc["low_l2", "mean_memory_saved_mb"] == pytest.approx(21.0)
     assert summary.loc["low_l2", "mean_memory_saved_percent"] == pytest.approx(
         21.0
     )
@@ -110,7 +134,7 @@ def test_summary_accuracy_uses_only_rows_that_exist() -> None:
 
 
 def test_raw_columns_include_all_compression_parameters() -> None:
-    assert RAW_COLUMNS[:9] == [
+    assert RAW_COLUMNS == [
         "model_name",
         "method",
         "config",
@@ -120,8 +144,29 @@ def test_raw_columns_include_all_compression_parameters() -> None:
         "observation_window_size",
         "pooling_kernel_size",
         "pooling_mode",
+        "skip_layers",
+        "seed",
+        "actual_depth",
+        "target",
+        "prediction",
+        "correct",
+        "cache_before_mb",
+        "cache_after_mb",
+        "memory_saved_mb",
+        "memory_saved_percent",
+        "elapsed_seconds",
     ]
-    assert "skip_layers" in RAW_COLUMNS
+
+
+def test_cache_memory_savings_uses_absolute_cache_sizes() -> None:
+    saved_mb, saved_percent = cache_memory_savings(100.0, 37.5)
+
+    assert saved_mb == pytest.approx(100.0 - 37.5)
+    assert saved_percent == pytest.approx(100.0 * (1.0 - 37.5 / 100.0))
+
+    baseline_saved_mb, baseline_saved_percent = cache_memory_savings(100.0, 100.0)
+    assert baseline_saved_mb == 0.0
+    assert baseline_saved_percent == 0.0
 
 
 def test_result_diagnostic_is_one_readable_line(capsys: Any) -> None:

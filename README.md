@@ -160,17 +160,23 @@ The raw columns are:
 model_name, method, config, context_length, keep_ratio,
 target_cache_tokens, observation_window_size, pooling_kernel_size,
 pooling_mode, skip_layers, seed, actual_depth, target, prediction, correct,
-memory_saved_percent, elapsed_seconds
+cache_before_mb, cache_after_mb, memory_saved_mb, memory_saved_percent,
+elapsed_seconds
 ```
 
 The summary contains:
 
 ```text
 model_name, method, config, context_length, keep_ratio,
-target_cache_tokens, observation_window_size, pooling_kernel_size,
-pooling_mode, num_examples, accuracy,
+target_cache_tokens, num_examples, accuracy,
+mean_cache_before_mb, mean_cache_after_mb, mean_memory_saved_mb,
 mean_memory_saved_percent, mean_elapsed_seconds
 ```
+
+Cache memory is measured from the real K/V tensors immediately after prefill
+and immediately after optional compression, before answer generation.
+`memory_saved_mb` is their difference. `memory_saved_percent` is derived from
+those two full-cache measurements rather than from the nominal keep ratio.
 
 For L2, `keep_ratio` is the requested ratio (`1.0` for the baseline) and
 `target_cache_tokens` is the resulting capacity of each compressed layer;
@@ -182,8 +188,15 @@ explicitly. Because the two methods compress different layer sets, compare
 their real `memory_saved_percent`, not only their keep ratios.
 
 Torch and Transformers versions, dtype, device map, skip layers, seeds, and
-method parameters are stored once in
-`results/<output-prefix>_metadata.json`.
+method parameters are stored once in the metadata JSON. SnapKV metadata also
+records `effective_keep_ratio` by context length; its `target_cache_tokens`
+includes the observation window (for example, 992 selected prefix tokens plus
+32 observation tokens equals a 1024-token target).
+
+`elapsed_seconds` is end-to-end evaluation time: prefill, optional compression,
+and answer generation. It is not decode-only time or a throughput metric. The
+console summary shows only the compact accuracy, memory, ratio, and elapsed-time
+columns; full experimental parameters remain in the raw CSV and metadata.
 
 ### Plot retrieval accuracy
 

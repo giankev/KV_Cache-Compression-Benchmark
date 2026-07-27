@@ -20,6 +20,7 @@ from l2kv.retrieval_eval import (
     evaluate_plain_or_l2,
     evaluate_snapkv,
     print_result,
+    print_summary,
     summarize_results,
 )
 from l2kv.runtime_metadata import (
@@ -138,6 +139,10 @@ def run_benchmark(
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    effective_keep_ratio = {
+        str(context_length): args.target_cache_tokens / context_length
+        for context_length in args.context_lengths
+    }
     results_dir = PROJECT_ROOT / "results"
     results_dir.mkdir(exist_ok=True)
     raw_path = results_dir / f"{args.output_prefix}_raw.csv"
@@ -171,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             {
                 "config": "snapkv",
                 "keep_ratio": "target_cache_tokens / context_length",
+                "effective_keep_ratio": effective_keep_ratio,
                 "target_cache_tokens": args.target_cache_tokens,
                 "observation_window_size": args.observation_window_size,
                 "pooling_kernel_size": args.pooling_kernel_size,
@@ -184,6 +190,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "metric": "exact_token_match",
             "observation_window_size": args.observation_window_size,
             "target_cache_tokens": args.target_cache_tokens,
+            "effective_keep_ratio": effective_keep_ratio,
             "pooling_kernel_size": args.pooling_kernel_size,
             "pooling_mode": args.pooling_mode,
         },
@@ -194,8 +201,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     raw_df = run_benchmark(model, tokenizer, args, raw_path)
     summary_df = summarize_results(raw_df)
     summary_df.to_csv(summary_path, index=False)
-    print("\nSummary:")
-    print(summary_df.to_string(index=False))
+    print_summary(summary_df)
     print(f"\nSaved {raw_path}")
     print(f"Saved {summary_path}")
     print(f"Saved {metadata_path}")
