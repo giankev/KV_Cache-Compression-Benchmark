@@ -24,7 +24,7 @@ def load_model_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     load_kwargs: dict[str, Any] = {
-        "torch_dtype": dtype,
+        "dtype": dtype,
         "device_map": device_map,
     }
     if attn_implementation is not None:

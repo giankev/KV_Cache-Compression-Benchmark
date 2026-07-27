@@ -30,11 +30,11 @@ from l2kv.snapkv import compress_snapkv_cache, prefill_and_score_snapkv
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 CONTEXT_TOKENS = 256
-OBSERVATION_WINDOW_SIZE = 16
+OBSERVATION_WINDOW_SIZE = 32
 KEEP_RATIO = 0.5
 POOLING_KERNEL_SIZE = 5
 POOLING_MODE = "max"
-SKIP_LAYERS = (0, 1)
+SKIP_LAYERS: tuple[int, ...] = ()
 CHUNK_SIZE = 64
 SEED = 0
 DTYPE = "auto"
@@ -190,6 +190,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"{num_kv_heads} KV heads"
         )
     group_size = num_query_heads // num_kv_heads
+    if (num_query_heads, num_kv_heads, group_size) != (14, 2, 7):
+        raise AssertionError(
+            "Expected Qwen2.5-0.5B GQA shape "
+            f"(14, 2, 7), got "
+            f"({num_query_heads}, {num_kv_heads}, {group_size})"
+        )
 
     metadata = make_run_metadata(
         script=Path(__file__).name,
@@ -241,6 +247,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
 
     lengths_before = cache_layer_lengths(result.cache)
+    if len(lengths_before) != 24:
+        raise AssertionError(
+            f"Expected 24 Qwen2.5-0.5B layers, got {len(lengths_before)}"
+        )
     if not lengths_before or any(
         length != args.context_tokens for length in lengths_before
     ):

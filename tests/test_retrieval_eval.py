@@ -89,7 +89,7 @@ def test_summary_accuracy_uses_only_rows_that_exist() -> None:
             "context_length": [8192, 8192, 8192],
             "keep_ratio": [0.10, 0.10, 0.125],
             "target_cache_tokens": [819, 819, 1024],
-            "observation_window_size": [None, None, 16],
+            "observation_window_size": [None, None, 32],
             "pooling_kernel_size": [None, None, 5],
             "pooling_mode": [None, None, "max"],
             "correct": [True, False, True],
@@ -146,7 +146,7 @@ def test_result_diagnostic_is_one_readable_line(capsys: Any) -> None:
 def test_l2_and_snapkv_capacity_contracts() -> None:
     assert target_capacity(8192, 0.10) == 819
     l2_cache = _Cache(8192, 8192, 819)
-    snapkv_cache = _Cache(8192, 8192, 1024)
+    snapkv_cache = _Cache(1024, 1024, 1024)
 
     assert_cache_capacity(l2_cache, 8192, 819, (0, 1), compressed=True)
-    assert_cache_capacity(snapkv_cache, 8192, 1024, (0, 1), compressed=True)
+    assert_cache_capacity(snapkv_cache, 8192, 1024, (), compressed=True)
