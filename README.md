@@ -226,11 +226,38 @@ models sharded by `device_map="auto"`.
 
 ## Online language modelling
 
-The existing online LM benchmark is unchanged:
+Online LM is a reduced reproduction inspired by the Wikipedia language
+modelling experiment in *A Simple and Effective L2 Norm-Based Strategy for KV
+Cache Compression*. It compares `low_l2`, `random`, `high_l2`, and `snapkv`
+against `no_compression` on:
+
+- one deterministic 8,192-token stream from the WikiText-2 test split;
+- a fixed maximum KV-cache capacity of 2,000 tokens;
+- 32-token causal blocks, with loss and next-token accuracy computed at every
+  position;
+- cumulative checkpoints every 512 processed tokens.
+
+Run the benchmark and plot its main cumulative log-PPL curve with:
 
 ```bash
 python scripts/run_online_lm.py
+python scripts/plot_online_lm.py
 ```
+
+The benchmark writes `results/online_lm_curve.csv`,
+`results/online_lm_summary.csv`, and `results/online_lm_metadata.json`. The plot
+defaults to `results/online_lm_log_ppl.png` and marks the 2,000-token KV budget.
+An optional accuracy plot can be produced with:
+
+```bash
+python scripts/plot_online_lm.py \
+  --accuracy-output results/online_lm_accuracy.png
+```
+
+For online SnapKV, each incoming 32-token block acts as the observation window
+when compression is required. This is a simple chunked adaptation for the
+shared online benchmark; it is not presented as the original SnapKV paper
+protocol.
 
 ## Main files
 
@@ -240,6 +267,7 @@ python scripts/run_online_lm.py
 - `scripts/run_l2_passkey.py`: L2-only runner.
 - `scripts/run_snapkv_passkey.py`: baseline and SnapKV runner.
 - `scripts/plot_retrieval.py`: generic accuracy-versus-context plot.
+- `scripts/plot_online_lm.py`: cumulative online LM log-PPL plot.
 - `src/l2kv/cache_compression.py`: L2/random cache policies.
 - `src/l2kv/snapkv.py`: SnapKV scoring and cache rewrite.
 
@@ -249,7 +277,8 @@ Implementation details are in
 
 ## Scope
 
-Compression happens after the full prompt prefill. It reduces the retained
-cache and autoregressive attention cost, but not prefill compute or peak prompt
-memory. Results are an educational benchmark, not a comprehensive reproduction
-of either reference repository.
+In the passkey benchmark, compression happens after the full prompt prefill and
+does not reduce prefill compute or peak prompt memory. The online LM benchmark
+instead applies its fixed budget after each 32-token block once the cache would
+exceed 2,000 tokens. Results are educational reduced benchmarks, not
+comprehensive reproductions of either reference repository.

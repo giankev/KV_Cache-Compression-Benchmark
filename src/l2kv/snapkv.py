@@ -150,6 +150,42 @@ def aggregate_gqa_attention(
     )
 
 
+def scores_from_block_attentions(
+    attentions: Sequence[torch.Tensor],
+    num_key_value_heads: int,
+    observation_window_size: int,
+    skip_layers: Sequence[int] = (),
+    reduction: ObservationReduction = "sum",
+) -> tuple[torch.Tensor | None, ...]:
+    """Build per-layer SnapKV prefix scores from one online observation block.
+
+    Each attention tensor has shape ``[batch, H_query, L_obs, L_cache]``.
+    The final ``L_obs`` key positions are the current, untouched observation
+    window; only attention paid to the preceding prefix is aggregated.
+    """
+
+    skipped = set(skip_layers)
+    scores_by_layer: list[torch.Tensor | None] = []
+    for layer_idx, attention in enumerate(attentions):
+        if layer_idx in skipped:
+            scores_by_layer.append(None)
+            continue
+        if attention.shape[2] != observation_window_size:
+            raise ValueError(
+                f"Layer {layer_idx} returned {attention.shape[2]} observation "
+                f"tokens, expected {observation_window_size}"
+            )
+        prefix_length = int(attention.shape[-1]) - observation_window_size
+        scores_by_layer.append(
+            aggregate_gqa_attention(
+                attention[..., :prefix_length],
+                num_key_value_heads,
+                reduction,
+            )
+        )
+    return tuple(scores_by_layer)
+
+
 def _aggregate_gqa_attention_unchecked(
     attention_prefix: torch.Tensor,
     num_key_value_heads: int,

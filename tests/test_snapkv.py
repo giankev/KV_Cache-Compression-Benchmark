@@ -11,6 +11,7 @@ from l2kv.snapkv import (
     compute_target_capacity,
     pool_attention_scores,
     rewrite_kv_cache,
+    scores_from_block_attentions,
     select_topk_indices,
     validate_snapkv_capacity,
 )
@@ -62,6 +63,28 @@ def test_gqa_groups_contiguous_query_heads_and_reduces_observation() -> None:
     assert torch.equal(summed[0, 1], torch.full((3,), 24.0))
     assert torch.equal(averaged[0, 0], torch.full((3,), 2.0))
     assert torch.equal(averaged[0, 1], torch.full((3,), 12.0))
+
+
+def test_block_attentions_score_only_prefix_and_keep_layer_alignment() -> None:
+    attention = torch.empty((1, 4, 2, 6), dtype=torch.float32)
+    attention[:, 0, :, :4] = 1.0
+    attention[:, 1, :, :4] = 3.0
+    attention[:, 2, :, :4] = 10.0
+    attention[:, 3, :, :4] = 14.0
+    attention[..., -2:] = 1_000.0
+
+    scores = scores_from_block_attentions(
+        (attention, attention),
+        num_key_value_heads=2,
+        observation_window_size=2,
+        skip_layers=(0,),
+    )
+
+    assert scores[0] is None
+    assert scores[1] is not None
+    assert scores[1].shape == (1, 2, 4)
+    assert torch.equal(scores[1][0, 0], torch.full((4,), 4.0))
+    assert torch.equal(scores[1][0, 1], torch.full((4,), 24.0))
 
 
 def test_max_pooling_matches_known_temporal_neighborhoods() -> None:
