@@ -77,8 +77,14 @@ def test_passkey_occurs_twice_and_question_is_the_prompt_suffix() -> None:
     ]
     question_ids = tuple(tokenizer("\n" + FINAL_QUESTION).input_ids)
 
+    assert FINAL_QUESTION.endswith("The pass key is ")
     assert _count_subsequence(stored_information, example.answer_ids) == 2
+    assert _count_subsequence(example.prompt_ids, example.answer_ids) == 2
     assert example.prompt_ids[example.question_token_position :] == question_ids
+    assert "".join(map(chr, example.prompt_ids)).endswith(FINAL_QUESTION)
+    assert example.answer_ids == tuple(
+        tokenizer(example.answer_text, add_special_tokens=False).input_ids
+    )
 
 
 def test_snapkv_requires_the_complete_question_to_fit_the_window() -> None:

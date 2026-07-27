@@ -9,9 +9,12 @@ import torch
 
 from l2kv.cache_metrics import cache_layer_lengths
 from l2kv.retrieval_eval import (
+    RAW_COLUMNS,
+    SUMMARY_COLUMNS,
     assert_cache_capacity,
     exact_token_match,
     generate_exact_answer,
+    print_result,
     summarize_results,
     target_capacity,
 )
@@ -80,8 +83,15 @@ def test_exact_generation_matches_ids_and_uses_logical_positions() -> None:
 def test_summary_accuracy_uses_only_rows_that_exist() -> None:
     raw = pd.DataFrame(
         {
+            "model_name": ["model", "model", "model"],
+            "method": ["l2", "l2", "snapkv"],
             "config": ["low_l2", "low_l2", "snapkv"],
             "context_length": [8192, 8192, 8192],
+            "keep_ratio": [0.10, 0.10, 0.125],
+            "target_cache_tokens": [819, 819, 1024],
+            "observation_window_size": [None, None, 16],
+            "pooling_kernel_size": [None, None, 5],
+            "pooling_mode": [None, None, "max"],
             "correct": [True, False, True],
             "memory_saved_percent": [20.0, 22.0, 80.0],
             "elapsed_seconds": [1.0, 3.0, 2.0],
@@ -90,12 +100,47 @@ def test_summary_accuracy_uses_only_rows_that_exist() -> None:
 
     summary = summarize_results(raw).set_index("config")
 
+    assert list(summarize_results(raw).columns) == SUMMARY_COLUMNS
     assert summary.loc["low_l2", "num_examples"] == 2
     assert summary.loc["low_l2", "accuracy"] == pytest.approx(0.5)
     assert summary.loc["low_l2", "mean_memory_saved_percent"] == pytest.approx(
         21.0
     )
     assert summary.loc["snapkv", "num_examples"] == 1
+
+
+def test_raw_columns_include_all_compression_parameters() -> None:
+    assert RAW_COLUMNS[:9] == [
+        "model_name",
+        "method",
+        "config",
+        "context_length",
+        "keep_ratio",
+        "target_cache_tokens",
+        "observation_window_size",
+        "pooling_kernel_size",
+        "pooling_mode",
+    ]
+    assert "skip_layers" in RAW_COLUMNS
+
+
+def test_result_diagnostic_is_one_readable_line(capsys: Any) -> None:
+    print_result(
+        {
+            "config": "no_compression",
+            "context_length": 8192,
+            "seed": 0,
+            "actual_depth": 0.43,
+            "target": "25248",
+            "prediction": "25248\n",
+            "correct": True,
+        }
+    )
+
+    assert capsys.readouterr().out == (
+        "no_compression | context=8192 | seed=0 | depth=0.43 | "
+        "target=25248 | prediction=25248\\n | correct=True\n"
+    )
 
 
 def test_l2_and_snapkv_capacity_contracts() -> None:

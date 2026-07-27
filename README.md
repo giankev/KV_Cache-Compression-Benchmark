@@ -41,39 +41,70 @@ and its greedy cache generation flow in
 
 The prompt is assembled directly from separately tokenized component IDs. It
 has exactly `context_length` tokens and is never decoded and re-tokenized.
-`random.Random(seed)` isolates prompt generation from global random state.
+`random.Random(seed)` isolates prompt generation from global random state. The
+terminal question is:
 
-### Quick checks
+```text
+Question: What is the pass key?
+Answer with only the number.
+The pass key is ␠
+```
 
-L2 with one seed:
+Here `␠` makes the trailing space visible; the actual prompt ends with
+`The pass key is `. Nothing follows it before generation, and the expected
+number is tokenized separately for exact matching.
+
+### Baseline calibration
+
+Start with the easier 4k sanity check:
 
 ```bash
 python scripts/run_l2_passkey.py \
+  --context-lengths 4096 \
   --seeds 0 \
-  --output-prefix l2_passkey_sanity
+  --output-prefix l2_passkey_sanity_4k
 ```
 
-SnapKV with one seed:
+Then repeat at the final default context length:
 
 ```bash
-python scripts/run_snapkv_passkey.py \
+python scripts/run_l2_passkey.py \
+  --context-lengths 8192 \
   --seeds 0 \
-  --output-prefix snapkv_passkey_sanity
+  --output-prefix l2_passkey_sanity_8k
 ```
+
+Inspect the `no_compression` line and raw row at both lengths. A failed baseline
+is retained, and the compressed configurations are skipped for that seed. Do
+not interpret compression results until both baselines have been verified.
 
 ### Complete 8k experiment
 
 ```bash
 python scripts/run_l2_passkey.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
+  --context-lengths 8192 \
+  --seeds 0 1 2 \
+  --keep-ratio 0.10 \
+  --skip-layers 0 1 \
+  --chunk-size 512 \
   --output-prefix l2_passkey_3b_8k_keep10
 
 python scripts/run_snapkv_passkey.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
+  --context-lengths 8192 \
+  --seeds 0 1 2 3 4 5 6 7 8 9 \
+  --target-cache-tokens 1024 \
+  --observation-window-size 32 \
+  --pooling-kernel-size 5 \
+  --pooling-mode max \
+  --chunk-size 512 \
   --output-prefix snapkv_passkey_3b_8k
 ```
 
-The fixed L2 experiment evaluates `no_compression`, `low_l2_keep10`,
-`random_keep10`, and `high_l2_keep10` on seeds 0, 1, and 2. Every compressed
-configuration keeps 10% of each non-skipped cache layer:
+The default L2 experiment evaluates `no_compression`, `low_l2`, `random`, and
+`high_l2` on seeds 0, 1, and 2. Every compressed configuration uses the
+requested `--keep-ratio` (10% by default) for each non-skipped cache layer:
 
 ```text
 3 seeds x 4 configurations = at most 12 runs
@@ -81,8 +112,9 @@ configuration keeps 10% of each non-skipped cache layer:
 
 The effective number can be lower because a failed baseline skips the three
 compressed configurations for that seed. The SnapKV runner evaluates only
-`no_compression` and `snapkv`, with a 16-token observation window and a
-1024-token target cache by default.
+`no_compression` and `snapkv`, with a 32-token observation window and a
+1024-token target cache by default. L2 leaves layers 0 and 1 intact; SnapKV has
+no `--skip-layers` option and compresses every layer.
 
 Each prompt is built once per context length and seed. The uncompressed
 baseline runs first. If it fails, that baseline row is saved and compressed
@@ -92,11 +124,23 @@ For later experiments, change only the context length and output prefix:
 
 ```bash
 python scripts/run_l2_passkey.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
   --context-lengths 16384 \
+  --seeds 0 1 2 \
+  --keep-ratio 0.10 \
+  --skip-layers 0 1 \
+  --chunk-size 512 \
   --output-prefix l2_passkey_3b_16k_keep10
 
 python scripts/run_snapkv_passkey.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
   --context-lengths 16384 \
+  --seeds 0 1 2 3 4 5 6 7 8 9 \
+  --target-cache-tokens 1024 \
+  --observation-window-size 32 \
+  --pooling-kernel-size 5 \
+  --pooling-mode max \
+  --chunk-size 512 \
   --output-prefix snapkv_passkey_3b_16k
 ```
 
@@ -113,17 +157,29 @@ results/<output-prefix>_raw.csv
 The raw columns are:
 
 ```text
-model_name, method, config, context_length, seed, actual_depth,
-target, prediction, correct, target_cache_tokens,
+model_name, method, config, context_length, keep_ratio,
+target_cache_tokens, observation_window_size, pooling_kernel_size,
+pooling_mode, skip_layers, seed, actual_depth, target, prediction, correct,
 memory_saved_percent, elapsed_seconds
 ```
 
 The summary contains:
 
 ```text
-config, context_length, num_examples, accuracy,
+model_name, method, config, context_length, keep_ratio,
+target_cache_tokens, observation_window_size, pooling_kernel_size,
+pooling_mode, num_examples, accuracy,
 mean_memory_saved_percent, mean_elapsed_seconds
 ```
+
+For L2, `keep_ratio` is the requested ratio (`1.0` for the baseline) and
+`target_cache_tokens` is the resulting capacity of each compressed layer;
+`skip_layers` is `[0, 1]`. Pooling fields are empty because L2 does not use
+pooling. For SnapKV, `keep_ratio` is the effective ratio
+`target_cache_tokens / context_length`, `skip_layers` is `[]`, and the target
+capacity, observation window, pooling kernel, and pooling mode are recorded
+explicitly. Because the two methods compress different layer sets, compare
+their real `memory_saved_percent`, not only their keep ratios.
 
 Torch and Transformers versions, dtype, device map, skip layers, seeds, and
 method parameters are stored once in

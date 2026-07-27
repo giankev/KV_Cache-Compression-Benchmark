@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 import torch
@@ -23,18 +23,30 @@ RAW_COLUMNS = [
     "method",
     "config",
     "context_length",
+    "keep_ratio",
+    "target_cache_tokens",
+    "observation_window_size",
+    "pooling_kernel_size",
+    "pooling_mode",
+    "skip_layers",
     "seed",
     "actual_depth",
     "target",
     "prediction",
     "correct",
-    "target_cache_tokens",
     "memory_saved_percent",
     "elapsed_seconds",
 ]
 SUMMARY_COLUMNS = [
+    "model_name",
+    "method",
     "config",
     "context_length",
+    "keep_ratio",
+    "target_cache_tokens",
+    "observation_window_size",
+    "pooling_kernel_size",
+    "pooling_mode",
     "num_examples",
     "accuracy",
     "mean_memory_saved_percent",
@@ -232,7 +244,12 @@ def _finish_result(
     method: str,
     config: str,
     example: PasskeyExample,
+    keep_ratio: float,
     target_cache_tokens: int,
+    observation_window_size: int | None,
+    pooling_kernel_size: int | None,
+    pooling_mode: str | None,
+    skip_layers: Sequence[int],
     memory_saved_percent: float,
     elapsed_seconds: float,
     generated_ids: Sequence[int],
@@ -243,12 +260,17 @@ def _finish_result(
         "method": method,
         "config": config,
         "context_length": example.context_length,
+        "keep_ratio": keep_ratio,
+        "target_cache_tokens": target_cache_tokens,
+        "observation_window_size": observation_window_size,
+        "pooling_kernel_size": pooling_kernel_size,
+        "pooling_mode": pooling_mode,
+        "skip_layers": list(skip_layers),
         "seed": example.seed,
         "actual_depth": example.actual_depth,
         "target": example.answer_text,
         "prediction": prediction,
         "correct": exact_token_match(generated_ids, example.answer_ids),
-        "target_cache_tokens": target_cache_tokens,
         "memory_saved_percent": memory_saved_percent,
         "elapsed_seconds": elapsed_seconds,
     }
@@ -267,6 +289,9 @@ def evaluate_plain_or_l2(
     skip_layers: Sequence[int],
     chunk_size: int,
     method: str = "l2",
+    observation_window_size: int | None = None,
+    pooling_kernel_size: int | None = None,
+    pooling_mode: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate the baseline or one L2 token-selection strategy."""
 
@@ -329,7 +354,12 @@ def evaluate_plain_or_l2(
         method=method,
         config=config,
         example=example,
+        keep_ratio=keep_ratio if compressed else 1.0,
         target_cache_tokens=capacity,
+        observation_window_size=observation_window_size,
+        pooling_kernel_size=pooling_kernel_size,
+        pooling_mode=pooling_mode,
+        skip_layers=skip_layers,
         memory_saved_percent=memory_saved_percent,
         elapsed_seconds=elapsed_seconds,
         generated_ids=generated_ids,
@@ -416,7 +446,12 @@ def evaluate_snapkv(
         method="snapkv",
         config="snapkv",
         example=example,
+        keep_ratio=target_cache_tokens / example.context_length,
         target_cache_tokens=target_cache_tokens,
+        observation_window_size=observation_window_size,
+        pooling_kernel_size=pooling_kernel_size,
+        pooling_mode=pooling_mode,
+        skip_layers=skip_layers,
         memory_saved_percent=memory_saved_percent,
         elapsed_seconds=elapsed_seconds,
         generated_ids=generated_ids,
@@ -431,11 +466,26 @@ def checkpoint_raw(rows: Sequence[dict[str, Any]], path: Path) -> pd.DataFrame:
     return frame
 
 
+def print_result(row: Mapping[str, Any]) -> None:
+    prediction = str(row["prediction"]).replace("\r", "\\r").replace("\n", "\\n")
+    print(
+        f"{row['config']} | context={row['context_length']} | "
+        f"seed={row['seed']} | depth={row['actual_depth']:.2f} | "
+        f"target={row['target']} | prediction={prediction} | "
+        f"correct={row['correct']}"
+    )
+
+
 def summarize_results(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df.empty:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
     summary = (
-        raw_df.groupby(["config", "context_length"], sort=False, as_index=False)
+        raw_df.groupby(
+            SUMMARY_COLUMNS[:9],
+            sort=False,
+            as_index=False,
+            dropna=False,
+        )
         .agg(
             num_examples=("correct", "size"),
             accuracy=("correct", "mean"),

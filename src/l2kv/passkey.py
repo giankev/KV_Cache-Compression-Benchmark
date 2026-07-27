@@ -11,7 +11,7 @@ import torch
 
 TASK_DESCRIPTION = (
     "There is an important info hidden inside a lot of irrelevant text. Find it "
-    "and memorize them. I will quiz you about the important information there."
+    "and memorize it. I will quiz you about the important information."
 )
 GARBAGE_UNIT = (
     "The grass is green. The sky is blue. The sun is yellow. Here we go. "
@@ -20,7 +20,11 @@ GARBAGE_UNIT = (
 INFORMATION_TEMPLATE = (
     "The pass key is {passkey}. Remember it. {passkey} is the pass key."
 )
-FINAL_QUESTION = "What is the pass key? The pass key is"
+FINAL_QUESTION = (
+    "Question: What is the pass key?\n"
+    "Answer with only the number.\n"
+    "The pass key is "
+)
 
 
 @dataclass(frozen=True)

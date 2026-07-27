@@ -121,9 +121,11 @@ k_prefix selected prefix tokens + L_obs observation tokens
 ```
 
 `target_capacity` must be at least `L_obs`. A keep ratio of 1 is a no-op. Layers
-listed in `skip_layers` are not changed; the benchmark uses layers 0 and 1 to
-match the existing L2 configurations. The passkey runner supplies one absolute
-capacity (1024 tokens by default), rather than evaluating a ratio grid.
+listed in `skip_layers` are not changed. The passkey runner supplies an empty
+skip list so SnapKV compresses every layer, plus one absolute capacity (1024
+tokens by default) rather than evaluating a ratio grid. The L2 benchmark keeps
+layers 0 and 1 intact, so measured cache memory—not the nominal ratio—is the
+fair comparison.
 
 This total-capacity rule follows the capacity semantics of Listing 1, where the
 observation window is included in `max_capacity_prompt`. The paper's separate
