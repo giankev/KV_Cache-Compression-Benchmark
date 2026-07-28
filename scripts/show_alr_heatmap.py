@@ -9,7 +9,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from l2kv.alr import scan_alr_qwen_decode_step, summarize_alr_by_layer
 from l2kv.attention_viz import plot_alr_heatmap
-from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
 from l2kv.runtime_metadata import (
     make_run_metadata,
@@ -23,6 +22,7 @@ MAX_TOKENS = 128
 SEED = 0
 DTYPE = "auto"
 ATTN_IMPLEMENTATION = "eager"
+SKIP_LAYERS = (0, 1)
 
 TEXTS = [
     "An embarrassingly simple way to compress the KV cache. "
@@ -69,7 +69,7 @@ def main() -> None:
         lengths=[MAX_TOKENS],
         depths=None,
         configurations=[{"name": "alr_heatmap"}],
-        skip_layers=get_default_skip_layers(),
+        skip_layers=SKIP_LAYERS,
         extra={"num_texts": len(TEXTS)},
     )
     print_run_metadata(metadata)

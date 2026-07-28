@@ -25,7 +25,10 @@ from l2kv.runtime_metadata import (
     print_run_metadata,
     save_run_metadata,
 )
-from l2kv.snapkv import compress_snapkv_cache, prefill_and_score_snapkv
+from l2kv.snapkv_compression import (
+    compress_snapkv_cache,
+    prefill_and_score_snapkv,
+)
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -233,20 +236,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         observation_window_size=args.observation_window_size,
         seed=args.seed,
     )
-    result = prefill_and_score_snapkv(
-        model=model,
-        prompt_ids=prompt.prompt_ids,
-        observation_window_size=args.observation_window_size,
-        chunk_size=args.chunk_size,
-        skip_layers=skip_layers,
+    cache, last_logits, logical_position, scores_by_layer = (
+        prefill_and_score_snapkv(
+            model=model,
+            prompt_ids=prompt.prompt_ids,
+            observation_window_size=args.observation_window_size,
+            chunk_size=args.chunk_size,
+            skip_layers=skip_layers,
+        )
     )
-    if result.logical_position != args.context_tokens:
+    if logical_position != args.context_tokens:
         raise AssertionError(
-            f"Logical position {result.logical_position}, "
+            f"Logical position {logical_position}, "
             f"expected {args.context_tokens}"
         )
 
-    lengths_before = cache_layer_lengths(result.cache)
+    lengths_before = cache_layer_lengths(cache)
     if len(lengths_before) != 24:
         raise AssertionError(
             f"Expected 24 Qwen2.5-0.5B layers, got {len(lengths_before)}"
@@ -261,32 +266,31 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     prefix_length = args.context_tokens - args.observation_window_size
     _assert_scores_are_gqa_shaped(
-        scores_by_layer=result.scores_by_layer,
+        scores_by_layer=scores_by_layer,
         num_layers=len(lengths_before),
         num_kv_heads=num_kv_heads,
         prefix_length=prefix_length,
         skip_layers=skip_layers,
     )
     observation_snapshots = _snapshot_observation_window(
-        result.cache,
+        cache,
         args.observation_window_size,
     )
     skipped_tensors = {
-        layer_idx: get_cache_layer(result.cache, layer_idx)
+        layer_idx: get_cache_layer(cache, layer_idx)
         for layer_idx in skip_layers
     }
-    last_logits = result.last_logits
 
     cache = compress_snapkv_cache(
-        cache=result.cache,
-        scores_by_layer=result.scores_by_layer,
+        cache=cache,
+        scores_by_layer=scores_by_layer,
         target_capacity=target_capacity,
         observation_window_size=args.observation_window_size,
         pooling_kernel_size=args.pooling_kernel_size,
         pooling_mode=args.pooling_mode,
         skip_layers=skip_layers,
     )
-    del result
+    del scores_by_layer
     lengths_after = cache_layer_lengths(cache)
     print(f"Query heads: {num_query_heads}")
     print(f"KV heads: {num_kv_heads}")

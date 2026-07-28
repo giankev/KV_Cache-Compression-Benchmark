@@ -11,9 +11,8 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from l2kv.cache_compression import compress_cache
+from l2kv.l2_compression import compress_cache_to_budget
 from l2kv.cache_metrics import cache_layer_lengths, get_cache_layer
-from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
 from l2kv.passkey import make_passkey_example
 from l2kv.position_utils import make_cache_position, make_position_ids
@@ -30,6 +29,7 @@ KEEP_RATIO = 0.5
 SEED = 0
 DTYPE = "auto"
 ATTN_IMPLEMENTATION = "eager"
+SKIP_LAYERS = (0, 1)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -51,7 +51,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 @torch.no_grad()
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-    skip_layers = get_default_skip_layers()
+    if not 0 < args.keep_ratio <= 1:
+        raise ValueError("keep_ratio must satisfy 0 < keep_ratio <= 1")
+    skip_layers = SKIP_LAYERS
     results_dir = PROJECT_ROOT / "results"
     results_dir.mkdir(exist_ok=True)
 
@@ -110,16 +112,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     ):
         raise AssertionError(f"Unexpected prefill layer lengths: {lengths_before}")
 
-    compress_cache(
+    expected_compressed_length = math.ceil(
+        args.keep_ratio * args.context_tokens
+    )
+    compress_cache_to_budget(
         cache,
-        keep_ratio=args.keep_ratio,
-        prune_after=0,
+        max_cache_tokens=expected_compressed_length,
         strategy="low_l2",
         skip_layers=skip_layers,
         seed=args.seed,
     )
     lengths_after = cache_layer_lengths(cache)
-    expected_compressed_length = math.ceil(args.keep_ratio * args.context_tokens)
 
     print(f"Layer lengths before compression: {lengths_before}")
     print(f"Layer lengths after compression:  {lengths_after}")

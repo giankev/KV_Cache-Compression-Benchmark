@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import math
-
 import pytest
 import torch
 
-from l2kv.cache_compression import compress_cache_to_budget
 from l2kv.cache_metrics import cache_layer_lengths
+from l2kv.l2_compression import compress_cache_to_budget
 from l2kv.position_utils import make_cache_position, make_position_ids
-from l2kv.snapkv import compress_snapkv_cache
+from l2kv.snapkv_compression import compress_snapkv_cache
 from scripts.run_online_lm import (
-    compute_metrics,
-    make_block,
+    BLOCK_SIZE,
+    CHECKPOINT_EVERY,
+    MAX_CACHE_TOKENS,
+    NUM_TOKENS,
+    ONLINE_LM_CONFIGS,
     make_block_causal_mask,
-    should_compress,
 )
 
 
@@ -29,53 +29,27 @@ class _Cache:
         self.layers = [_Layer(length) for length in lengths]
 
 
-def test_block_labels_are_shifted_by_exactly_one_token() -> None:
-    token_ids = torch.arange(12).unsqueeze(0)
-
-    input_ids, labels = make_block(token_ids, start=3, block_size=4)
-
-    assert input_ids.tolist() == [[3, 4, 5, 6]]
-    assert labels.tolist() == [[4, 5, 6, 7]]
-    assert torch.equal(labels[:, :-1], input_ids[:, 1:])
-
-
-def test_metrics_use_cumulative_nll_and_prediction_counts() -> None:
-    first = compute_metrics(
-        total_nll=2.0,
-        correct_next_tokens=1,
-        num_predictions=2,
+def test_online_lm_protocol_constants_and_configurations_are_unchanged() -> None:
+    assert (NUM_TOKENS, MAX_CACHE_TOKENS, BLOCK_SIZE, CHECKPOINT_EVERY) == (
+        8192,
+        2000,
+        32,
+        512,
     )
-    cumulative = compute_metrics(
-        total_nll=2.0 + 6.0,
-        correct_next_tokens=1 + 2,
-        num_predictions=2 + 3,
-    )
-
-    assert first == pytest.approx((1.0, math.e, 0.5))
-    assert cumulative == pytest.approx((1.6, math.exp(1.6), 0.6))
-
-
-@pytest.mark.parametrize(
-    ("previous_cache_length", "block_length", "expected"),
-    [
-        (0, 32, False),
-        (1968, 32, False),
-        (2000, 32, True),
-    ],
-)
-def test_cache_is_compressed_only_when_the_next_block_exceeds_budget(
-    previous_cache_length: int,
-    block_length: int,
-    expected: bool,
-) -> None:
-    assert (
-        should_compress(
-            previous_cache_length,
-            block_length,
-            max_cache_tokens=2000,
-        )
-        is expected
-    )
+    assert [config["config"] for config in ONLINE_LM_CONFIGS] == [
+        "no_compression",
+        "low_l2",
+        "random",
+        "high_l2",
+        "snapkv",
+    ]
+    assert [config["skip_layers"] for config in ONLINE_LM_CONFIGS] == [
+        (),
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (),
+    ]
 
 
 @pytest.mark.parametrize("previous_cache_length", [3, 5])

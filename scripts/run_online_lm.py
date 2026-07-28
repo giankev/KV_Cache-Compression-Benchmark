@@ -15,13 +15,13 @@ from datasets import load_dataset
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from l2kv.cache_compression import compress_cache_to_budget
 from l2kv.cache_metrics import (
     cache_layer_lengths,
     get_cache_layer,
     kv_cache_size_mb,
     theoretical_kv_cache_size_mb,
 )
+from l2kv.l2_compression import compress_cache_to_budget
 from l2kv.model_utils import get_model_config, load_model_and_tokenizer
 from l2kv.position_utils import make_cache_position, make_position_ids
 from l2kv.runtime_metadata import (
@@ -29,7 +29,7 @@ from l2kv.runtime_metadata import (
     print_run_metadata,
     save_run_metadata,
 )
-from l2kv.snapkv import (
+from l2kv.snapkv_compression import (
     compress_snapkv_cache,
     scores_from_block_attentions,
 )
@@ -122,24 +122,6 @@ def load_token_sequence(tokenizer: Any, num_tokens: int = NUM_TOKENS) -> torch.T
     ).unsqueeze(0)
 
 
-def make_block(
-    token_ids: torch.Tensor,
-    *,
-    start: int,
-    block_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    end = min(start + block_size, int(token_ids.shape[1]) - 1)
-    return token_ids[:, start:end], token_ids[:, start + 1 : end + 1]
-
-
-def should_compress(
-    previous_cache_length: int,
-    block_length: int,
-    max_cache_tokens: int = MAX_CACHE_TOKENS,
-) -> bool:
-    return previous_cache_length + block_length > max_cache_tokens
-
-
 def make_block_causal_mask(
     previous_cache_length: int,
     block_length: int,
@@ -164,20 +146,6 @@ def make_block_causal_mask(
         diagonal=1,
     )
     return mask
-
-
-def compute_metrics(
-    *,
-    total_nll: float,
-    correct_next_tokens: int,
-    num_predictions: int,
-) -> tuple[float, float, float]:
-    log_ppl = total_nll / num_predictions
-    return (
-        log_ppl,
-        math.exp(log_ppl),
-        correct_next_tokens / num_predictions,
-    )
 
 
 @torch.inference_mode()
@@ -211,17 +179,15 @@ def evaluate_config(
     started = perf_counter()
 
     for start in range(0, NUM_TOKENS, BLOCK_SIZE):
-        block_ids, labels = make_block(
-            input_tokens,
-            start=start,
-            block_size=BLOCK_SIZE,
-        )
+        end = min(start + BLOCK_SIZE, int(input_tokens.shape[1]) - 1)
+        block_ids = input_tokens[:, start:end]
+        labels = input_tokens[:, start + 1 : end + 1]
         block_length = int(block_ids.shape[1])
         previous_lengths = cache_layer_lengths(cache) if cache is not None else []
         previous_cache_length = previous_lengths[0] if previous_lengths else 0
-        collect_snapkv_scores = strategy == "snapkv" and should_compress(
-            previous_cache_length,
-            block_length,
+        collect_snapkv_scores = (
+            strategy == "snapkv"
+            and previous_cache_length + block_length > MAX_CACHE_TOKENS
         )
         position_ids = make_position_ids(
             logical_position,
@@ -403,11 +369,9 @@ def evaluate_config(
         ):
             for cuda_device in cuda_devices:
                 torch.cuda.synchronize(cuda_device)
-            log_ppl, perplexity, accuracy = compute_metrics(
-                total_nll=total_nll,
-                correct_next_tokens=correct_next_tokens,
-                num_predictions=num_predictions,
-            )
+            log_ppl = total_nll / num_predictions
+            perplexity = math.exp(log_ppl)
+            accuracy = correct_next_tokens / num_predictions
             cache_mb = kv_cache_size_mb(cache)
             baseline_cache_mb = theoretical_kv_cache_size_mb(
                 model,

@@ -14,8 +14,13 @@ import pandas as pd
 import torch
 
 from .cache_metrics import cache_layer_lengths, kv_cache_size_mb
+from .l2_compression import compress_cache_to_budget
 from .passkey import PasskeyExample
 from .position_utils import make_cache_position, make_position_ids
+from .snapkv_compression import (
+    compress_snapkv_cache,
+    prefill_and_score_snapkv,
+)
 
 
 RAW_COLUMNS = [
@@ -123,33 +128,6 @@ def prefill_plain(
     if cache is None or last_logits is None:
         raise AssertionError("Prompt prefill did not run")
     return cache, last_logits, logical_position
-
-
-@torch.inference_mode()
-def prefill_snapkv(
-    model: Any,
-    prompt_ids: Sequence[int],
-    observation_window_size: int,
-    chunk_size: int,
-    skip_layers: Sequence[int],
-) -> tuple[Any, torch.Tensor, int, Sequence[torch.Tensor | None]]:
-    """Prefill one prompt and collect per-layer SnapKV scores."""
-
-    from .snapkv import prefill_and_score_snapkv
-
-    result = prefill_and_score_snapkv(
-        model=model,
-        prompt_ids=prompt_ids,
-        observation_window_size=observation_window_size,
-        chunk_size=chunk_size,
-        skip_layers=skip_layers,
-    )
-    return (
-        result.cache,
-        result.last_logits,
-        result.logical_position,
-        result.scores_by_layer,
-    )
 
 
 def exact_token_match(
@@ -345,8 +323,6 @@ def evaluate_plain_or_l2(
         else example.context_length
     )
     if compressed:
-        from .cache_compression import compress_cache_to_budget
-
         cache = compress_cache_to_budget(
             cache,
             max_cache_tokens=capacity,
@@ -416,17 +392,17 @@ def evaluate_snapkv(
 ) -> dict[str, Any]:
     """Evaluate SnapKV after a full logical-position-preserving prefill."""
 
-    from .snapkv import compress_snapkv_cache
-
     devices = cuda_devices(model)
     synchronize_cuda_devices(devices)
     started = perf_counter()
-    cache, last_logits, logical_position, scores_by_layer = prefill_snapkv(
-        model,
-        example.prompt_ids,
-        observation_window_size,
-        chunk_size,
-        skip_layers,
+    cache, last_logits, logical_position, scores_by_layer = (
+        prefill_and_score_snapkv(
+            model=model,
+            prompt_ids=example.prompt_ids,
+            observation_window_size=observation_window_size,
+            chunk_size=chunk_size,
+            skip_layers=skip_layers,
+        )
     )
     if logical_position != example.context_length:
         raise AssertionError("Logical position after prefill must equal prompt length")

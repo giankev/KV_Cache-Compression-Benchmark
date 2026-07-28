@@ -13,7 +13,6 @@ from l2kv.alr import (
     summarize_alr_by_layer,
     suggest_skip_layers_from_alr,
 )
-from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
 from l2kv.runtime_metadata import (
     make_run_metadata,
@@ -47,6 +46,7 @@ TEXTS = [
     "In a passkey retrieval task, a secret number is inserted inside a long document, and the model must remember "
     "the number and output it correctly at the end.",
 ]
+SKIP_LAYERS = (0, 1)
 
 
 def main() -> None:
@@ -80,7 +80,7 @@ def main() -> None:
                 ],
             }
         ],
-        skip_layers=get_default_skip_layers(),
+        skip_layers=SKIP_LAYERS,
         extra={
             "device_map_requested": CONFIG["device_map"],
             "num_texts": len(TEXTS),

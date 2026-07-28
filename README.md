@@ -268,8 +268,8 @@ protocol.
 - `scripts/run_snapkv_passkey.py`: baseline and SnapKV runner.
 - `scripts/plot_retrieval.py`: generic accuracy-versus-context plot.
 - `scripts/plot_online_lm.py`: cumulative online LM log-PPL plot.
-- `src/l2kv/cache_compression.py`: L2/random cache policies.
-- `src/l2kv/snapkv.py`: SnapKV scoring and cache rewrite.
+- `src/l2kv/l2_compression.py`: low-L2, high-L2, and random cache policies.
+- `src/l2kv/snapkv_compression.py`: SnapKV scoring and cache rewrite.
 
 Implementation details are in
 [`docs/IMPLEMENTATION_NOTES.md`](docs/IMPLEMENTATION_NOTES.md) and

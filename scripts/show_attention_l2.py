@@ -8,7 +8,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from l2kv.attention_viz import plot_attention_l2_heatmap
-from l2kv.configs import get_default_skip_layers
 from l2kv.model_utils import load_model_and_tokenizer
 from l2kv.runtime_metadata import (
     make_run_metadata,
@@ -22,6 +21,7 @@ MAX_TOKENS = 64
 SEED = 0
 DTYPE = "auto"
 ATTN_IMPLEMENTATION = "eager"
+SKIP_LAYERS = (0, 1)
 TEXT = (
     "There is an important pass key hidden in this short document. "
     "The pass key is 57291. Remember it. 57291 is the pass key. "
@@ -62,7 +62,7 @@ def main() -> None:
         lengths=[MAX_TOKENS],
         depths=None,
         configurations=[{"name": "attention_l2_heatmap"}],
-        skip_layers=get_default_skip_layers(),
+        skip_layers=SKIP_LAYERS,
     )
     print_run_metadata(metadata)
     save_run_metadata(PROJECT_ROOT / "results" / "run_metadata.json", metadata)

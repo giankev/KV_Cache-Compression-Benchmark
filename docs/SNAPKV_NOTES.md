@@ -145,7 +145,7 @@ The L2 strategies are query-independent. They score cached keys using only
 their norms and can run after a cache has been built without access to attention
 weights. SnapKV instead needs an observation pass and therefore lives in a
 separate module rather than being another norm-only option in
-`cache_compression.py`.
+`l2_compression.py`.
 
 ## Passkey benchmark
 
