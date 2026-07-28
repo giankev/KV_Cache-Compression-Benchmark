@@ -17,7 +17,6 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = PROJECT_ROOT / "results" / "online_lm_curve.csv"
 DEFAULT_OUTPUT = PROJECT_ROOT / "results" / "online_lm_log_ppl.png"
-KV_BUDGET = 2000
 CONFIG_ORDER = (
     "no_compression",
     "low_l2",
@@ -26,7 +25,35 @@ CONFIG_ORDER = (
     "high_l2",
     "snapkv",
 )
-REQUIRED_COLUMNS = {"config", "processed_tokens", "log_ppl"}
+REQUIRED_COLUMNS = {
+    "config",
+    "processed_tokens",
+    "max_cache_tokens",
+    "log_ppl",
+}
+
+
+def get_kv_budget(frame: pd.DataFrame) -> int:
+    if "max_cache_tokens" not in frame:
+        raise ValueError(
+            "Online LM curve CSV is missing required column: max_cache_tokens"
+        )
+
+    values = pd.to_numeric(frame["max_cache_tokens"], errors="raise")
+    if values.isna().any() or not all(
+        float(value).is_integer() for value in values
+    ):
+        raise ValueError("max_cache_tokens must contain integer values")
+
+    budgets = sorted({int(value) for value in values})
+    if len(budgets) != 1:
+        raise ValueError(
+            "Online LM curve CSV must contain exactly one unique cache budget; "
+            f"found {budgets}"
+        )
+    if budgets[0] <= 0:
+        raise ValueError("max_cache_tokens must be greater than zero")
+    return budgets[0]
 
 
 def load_results(path: Path) -> pd.DataFrame:
@@ -42,12 +69,18 @@ def load_results(path: Path) -> pd.DataFrame:
         frame["processed_tokens"],
         errors="raise",
     )
+    frame["max_cache_tokens"] = pd.to_numeric(
+        frame["max_cache_tokens"],
+        errors="raise",
+    )
     frame["log_ppl"] = pd.to_numeric(frame["log_ppl"], errors="raise")
     if "next_token_accuracy" in frame:
         frame["next_token_accuracy"] = pd.to_numeric(
             frame["next_token_accuracy"],
             errors="raise",
         )
+    get_kv_budget(frame)
+    frame["max_cache_tokens"] = frame["max_cache_tokens"].astype("int64")
     return frame
 
 
@@ -58,6 +91,7 @@ def plot_curve(
     ylabel: str,
     output: Path,
     title: str,
+    kv_budget: int,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
@@ -75,7 +109,7 @@ def plot_curve(
         )
 
     ax.axvline(
-        KV_BUDGET,
+        kv_budget,
         color="black",
         linestyle="--",
         linewidth=1.5,
@@ -108,12 +142,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     frame = load_results(args.input_csv)
+    kv_budget = get_kv_budget(frame)
     plot_curve(
         frame,
         value_column="log_ppl",
         ylabel="log PPL",
         output=args.output,
         title="Online language modelling",
+        kv_budget=kv_budget,
     )
     print(f"Saved {args.output}")
 
@@ -129,6 +165,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             ylabel="Next-token accuracy",
             output=args.accuracy_output,
             title="Online next-token accuracy",
+            kv_budget=kv_budget,
         )
         print(f"Saved {args.accuracy_output}")
 

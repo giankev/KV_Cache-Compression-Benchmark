@@ -33,9 +33,28 @@ class _Cache:
 
 
 def test_online_lm_cli_defaults_to_compressing_every_layer() -> None:
-    assert parse_args([]).skip_layers == ()
+    default_args = parse_args([])
+
+    assert default_args.max_cache_tokens == 2000
+    assert default_args.skip_layers == ()
     assert parse_args(["--skip-layers"]).skip_layers == []
     assert tuple(parse_args(["--skip-layers", "0", "1"]).skip_layers) == (0, 1)
+    assert (
+        parse_args(["--max-cache-tokens", "1000"]).max_cache_tokens == 1000
+    )
+    combined_args = parse_args(
+        ["--max-cache-tokens", "1000", "--skip-layers", "0", "1"]
+    )
+    assert combined_args.max_cache_tokens == 1000
+    assert tuple(combined_args.skip_layers) == (0, 1)
+
+
+@pytest.mark.parametrize("max_cache_tokens", [0, -1])
+def test_online_lm_cli_rejects_invalid_cache_budgets(
+    max_cache_tokens: int,
+) -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        parse_args(["--max-cache-tokens", str(max_cache_tokens)])
 
 
 def test_online_lm_protocol_constants_and_default_configurations() -> None:
@@ -118,6 +137,19 @@ def test_l2_online_budget_compresses_every_layer_without_skips() -> None:
     assert cache_layer_lengths(cache) == [2000, 2000, 2000, 2000]
 
 
+def test_l2_online_custom_budget_compresses_every_layer() -> None:
+    cache = _Cache(1032, 1032, 1032, 1032)
+
+    compress_cache_to_budget(
+        cache,
+        max_cache_tokens=1000,
+        strategy="low_l2",
+        skip_layers=(),
+    )
+
+    assert cache_layer_lengths(cache) == [1000, 1000, 1000, 1000]
+
+
 def test_l2_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
     cache = _Cache(2032, 2032, 2032, 2032)
 
@@ -137,6 +169,19 @@ def test_l2_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
         )
 
 
+def test_l2_online_custom_budget_composes_with_skip_layers() -> None:
+    cache = _Cache(1032, 1032, 1032, 1032)
+
+    compress_cache_to_budget(
+        cache,
+        max_cache_tokens=1000,
+        strategy="low_l2",
+        skip_layers=(0, 1),
+    )
+
+    assert cache_layer_lengths(cache) == [1032, 1032, 1000, 1000]
+
+
 def test_keydiff_online_budget_compresses_every_layer_without_skips() -> None:
     cache = _Cache(2032, 2032, 2032, 2032)
 
@@ -147,6 +192,18 @@ def test_keydiff_online_budget_compresses_every_layer_without_skips() -> None:
     )
 
     assert cache_layer_lengths(cache) == [2000, 2000, 2000, 2000]
+
+
+def test_keydiff_online_custom_budget_compresses_every_layer() -> None:
+    cache = _Cache(1032, 1032, 1032, 1032)
+
+    compress_keydiff_cache_to_budget(
+        cache,
+        max_cache_tokens=1000,
+        skip_layers=(),
+    )
+
+    assert cache_layer_lengths(cache) == [1000, 1000, 1000, 1000]
 
 
 def test_keydiff_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
@@ -165,6 +222,18 @@ def test_keydiff_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
             layer.values - layer.keys,
             torch.full_like(layer.keys, 100),
         )
+
+
+def test_keydiff_online_custom_budget_composes_with_skip_layers() -> None:
+    cache = _Cache(1032, 1032, 1032, 1032)
+
+    compress_keydiff_cache_to_budget(
+        cache,
+        max_cache_tokens=1000,
+        skip_layers=(0, 1),
+    )
+
+    assert cache_layer_lengths(cache) == [1032, 1032, 1000, 1000]
 
 
 def test_snapkv_online_budget_preserves_the_complete_observation_window() -> None:
@@ -203,6 +272,59 @@ def test_snapkv_online_budget_preserves_the_complete_observation_window() -> Non
             layer.values - layer.keys,
             torch.full_like(layer.keys, 100),
         )
+
+
+def test_snapkv_online_custom_budget_preserves_observation_window() -> None:
+    cache = _Cache(1032, 1032)
+    original_observation = [
+        (
+            layer.keys[..., -32:, :].clone(),
+            layer.values[..., -32:, :].clone(),
+        )
+        for layer in cache.layers
+    ]
+    scores_by_layer = tuple(
+        torch.arange(1000, dtype=torch.float32).reshape(1, 1, 1000)
+        for _ in cache.layers
+    )
+
+    compress_snapkv_cache(
+        cache,
+        scores_by_layer=scores_by_layer,
+        target_capacity=1000,
+        observation_window_size=32,
+        pooling_kernel_size=5,
+        pooling_mode="max",
+        skip_layers=(),
+    )
+
+    assert cache_layer_lengths(cache) == [1000, 1000]
+    for layer, (observation_keys, observation_values) in zip(
+        cache.layers,
+        original_observation,
+        strict=True,
+    ):
+        assert torch.equal(layer.keys[..., -32:, :], observation_keys)
+        assert torch.equal(layer.values[..., -32:, :], observation_values)
+
+
+def test_snapkv_online_custom_budget_composes_with_skip_layers() -> None:
+    cache = _Cache(1032, 1032, 1032, 1032)
+    active_scores = torch.arange(1000, dtype=torch.float32).reshape(
+        1, 1, 1000
+    )
+
+    compress_snapkv_cache(
+        cache,
+        scores_by_layer=(None, None, active_scores, active_scores),
+        target_capacity=1000,
+        observation_window_size=32,
+        pooling_kernel_size=5,
+        pooling_mode="max",
+        skip_layers=(0, 1),
+    )
+
+    assert cache_layer_lengths(cache) == [1032, 1032, 1000, 1000]
 
 
 def test_snapkv_online_budget_keeps_skipped_layers_uncompressed() -> None:

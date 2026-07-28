@@ -254,7 +254,8 @@ Cache Compression*. It compares `low_l2`, `keydiff`, `random`, `high_l2`, and
 `snapkv` against `no_compression` on:
 
 - one deterministic 8,192-token stream from the WikiText-2 test split;
-- a fixed maximum KV-cache capacity of 2,000 tokens;
+- one shared maximum KV-cache capacity for every compressed method, defaulting
+  to 2,000 tokens;
 - 32-token causal blocks, with loss and next-token accuracy computed at every
   position;
 - cumulative checkpoints every 512 processed tokens.
@@ -266,22 +267,37 @@ python scripts/run_online_lm.py
 python scripts/plot_online_lm.py
 ```
 
+Set a different absolute budget with `--max-cache-tokens`:
+
+```bash
+python scripts/run_online_lm.py \
+  --max-cache-tokens 1000
+```
+
 By default every compression method operates on every model layer. To preserve
-layers 0 and 1 for all compressed methods in the same controlled run, pass the
-shared experimental parameter explicitly:
+layers 0 and 1 for every compressed method, select them explicitly:
 
 ```bash
 python scripts/run_online_lm.py --skip-layers 0 1
 ```
 
+The budget and skipped-layer controls can be combined:
+
+```bash
+python scripts/run_online_lm.py \
+  --max-cache-tokens 1000 \
+  --skip-layers 0 1
+```
+
 Layer skipping is therefore a benchmark control, not an implicit requirement
-of KeyDiff, SnapKV, or any other eviction strategy.
+of KeyDiff, SnapKV, or any other eviction strategy. All compressed methods in
+one run use the same selected cache budget and skipped layers.
 
 The benchmark writes `results/online_lm_curve.csv`,
 `results/online_lm_summary.csv`, and `results/online_lm_metadata.json`. The plot
 defaults to `results/online_lm_log_ppl.png`, includes the KeyDiff curve
-automatically, and marks the 2,000-token KV budget. An optional accuracy plot
-can be produced with:
+automatically, and reads the cache budget from the CSV to place its vertical
+budget marker. An optional accuracy plot can be produced with:
 
 ```bash
 python scripts/plot_online_lm.py \

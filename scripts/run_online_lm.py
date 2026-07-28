@@ -128,6 +128,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Benchmark online language modelling with bounded KV caches."
     )
     parser.add_argument(
+        "--max-cache-tokens",
+        type=int,
+        default=MAX_CACHE_TOKENS,
+        help=f"Maximum KV-cache capacity in tokens (default: {MAX_CACHE_TOKENS}).",
+    )
+    parser.add_argument(
         "--skip-layers",
         type=int,
         nargs="*",
@@ -137,7 +143,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "(default: compress every layer)."
         ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.max_cache_tokens <= 0:
+        raise ValueError("--max-cache-tokens must be greater than zero")
+    return args
 
 
 def load_token_sequence(tokenizer: Any, num_tokens: int = NUM_TOKENS) -> torch.Tensor:
@@ -198,6 +207,8 @@ def evaluate_config(
     model: Any,
     token_ids: torch.Tensor,
     config: dict[str, Any],
+    *,
+    max_cache_tokens: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     config_name = str(config["config"])
     strategy = str(config["strategy"])
@@ -237,7 +248,7 @@ def evaluate_config(
         collect_snapkv_scores = (
             strategy == "snapkv"
             and any(
-                length + block_length > MAX_CACHE_TOKENS
+                length + block_length > max_cache_tokens
                 for length in active_previous_lengths
             )
         )
@@ -326,10 +337,10 @@ def evaluate_config(
                 for layer_idx, length in enumerate(cache_layer_lengths(cache))
                 if layer_idx not in skip_layers
             ]
-            if any(length > MAX_CACHE_TOKENS for length in active_lengths):
+            if any(length > max_cache_tokens for length in active_lengths):
                 cache = compress_cache_to_budget(
                     cache,
-                    max_cache_tokens=MAX_CACHE_TOKENS,
+                    max_cache_tokens=max_cache_tokens,
                     strategy=strategy,
                     skip_layers=skip_layers,
                 )
@@ -338,7 +349,7 @@ def evaluate_config(
                 expected = (
                     logical_position
                     if layer_idx in skip_layers
-                    else min(logical_position, MAX_CACHE_TOKENS)
+                    else min(logical_position, max_cache_tokens)
                 )
                 if length != expected:
                     raise AssertionError(
@@ -351,10 +362,10 @@ def evaluate_config(
                 for layer_idx, length in enumerate(cache_layer_lengths(cache))
                 if layer_idx not in skip_layers
             ]
-            if any(length > MAX_CACHE_TOKENS for length in active_lengths):
+            if any(length > max_cache_tokens for length in active_lengths):
                 cache = compress_keydiff_cache_to_budget(
                     cache,
-                    max_cache_tokens=MAX_CACHE_TOKENS,
+                    max_cache_tokens=max_cache_tokens,
                     skip_layers=skip_layers,
                 )
             lengths = cache_layer_lengths(cache)
@@ -362,7 +373,7 @@ def evaluate_config(
                 expected = (
                     logical_position
                     if layer_idx in skip_layers
-                    else min(logical_position, MAX_CACHE_TOKENS)
+                    else min(logical_position, max_cache_tokens)
                 )
                 if length != expected:
                     raise AssertionError(
@@ -402,7 +413,7 @@ def evaluate_config(
                 cache = compress_snapkv_cache(
                     cache,
                     scores_by_layer=scores_by_layer,
-                    target_capacity=MAX_CACHE_TOKENS,
+                    target_capacity=max_cache_tokens,
                     observation_window_size=OBSERVATION_WINDOW_SIZE,
                     pooling_kernel_size=POOLING_KERNEL_SIZE,
                     pooling_mode=POOLING_MODE,
@@ -417,7 +428,7 @@ def evaluate_config(
                     expected_length = (
                         logical_position
                         if layer_idx in skip_layers
-                        else MAX_CACHE_TOKENS
+                        else max_cache_tokens
                     )
                     if int(keys.shape[2]) != expected_length:
                         raise AssertionError(
@@ -454,7 +465,7 @@ def evaluate_config(
                     expected = (
                         logical_position
                         if layer_idx in skip_layers
-                        else min(logical_position, MAX_CACHE_TOKENS)
+                        else min(logical_position, max_cache_tokens)
                     )
                     if length != expected:
                         raise AssertionError(
@@ -499,7 +510,7 @@ def evaluate_config(
                     "model_name": MODEL_NAME,
                     "config": config_name,
                     "processed_tokens": logical_position,
-                    "max_cache_tokens": MAX_CACHE_TOKENS,
+                    "max_cache_tokens": max_cache_tokens,
                     "log_ppl": log_ppl,
                     "perplexity": perplexity,
                     "next_token_accuracy": accuracy,
@@ -524,7 +535,7 @@ def evaluate_config(
         "model_name": MODEL_NAME,
         "config": config_name,
         "num_tokens": NUM_TOKENS,
-        "max_cache_tokens": MAX_CACHE_TOKENS,
+        "max_cache_tokens": max_cache_tokens,
         "final_log_ppl": final["log_ppl"],
         "final_perplexity": final["perplexity"],
         "final_next_token_accuracy": final["next_token_accuracy"],
@@ -568,11 +579,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             "dataset_config": DATASET_CONFIG,
             "dataset_split": DATASET_SPLIT,
             "num_tokens": NUM_TOKENS,
-            "max_cache_tokens": MAX_CACHE_TOKENS,
+            "max_cache_tokens": args.max_cache_tokens,
             "block_size": BLOCK_SIZE,
             "checkpoint_every": CHECKPOINT_EVERY,
             "snapkv": {
-                "target_cache_tokens": MAX_CACHE_TOKENS,
+                "target_cache_tokens": args.max_cache_tokens,
                 "observation_window_size": OBSERVATION_WINDOW_SIZE,
                 "pooling_kernel_size": POOLING_KERNEL_SIZE,
                 "pooling_mode": POOLING_MODE,
@@ -591,7 +602,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     curve_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     for config in online_lm_configs:
-        config_curve, config_summary = evaluate_config(model, token_ids, config)
+        config_curve, config_summary = evaluate_config(
+            model,
+            token_ids,
+            config,
+            max_cache_tokens=args.max_cache_tokens,
+        )
         curve_rows.extend(config_curve)
         summary_rows.append(config_summary)
         pd.DataFrame(curve_rows, columns=CURVE_COLUMNS).to_csv(
@@ -607,7 +623,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         row["processed_tokens"]: row
         for row in curve_rows
         if row["config"] == "no_compression"
-        and row["processed_tokens"] <= MAX_CACHE_TOKENS
+        and row["processed_tokens"] <= args.max_cache_tokens
     }
     for row in curve_rows:
         baseline = baseline_before_budget.get(row["processed_tokens"])
