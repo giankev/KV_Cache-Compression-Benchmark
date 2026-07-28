@@ -266,6 +266,17 @@ python scripts/run_online_lm.py
 python scripts/plot_online_lm.py
 ```
 
+By default every compression method operates on every model layer. To preserve
+layers 0 and 1 for all compressed methods in the same controlled run, pass the
+shared experimental parameter explicitly:
+
+```bash
+python scripts/run_online_lm.py --skip-layers 0 1
+```
+
+Layer skipping is therefore a benchmark control, not an implicit requirement
+of KeyDiff, SnapKV, or any other eviction strategy.
+
 The benchmark writes `results/online_lm_curve.csv`,
 `results/online_lm_summary.csv`, and `results/online_lm_metadata.json`. The plot
 defaults to `results/online_lm_log_ppl.png`, includes the KeyDiff curve

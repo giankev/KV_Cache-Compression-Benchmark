@@ -14,7 +14,9 @@ from scripts.run_online_lm import (
     MAX_CACHE_TOKENS,
     NUM_TOKENS,
     ONLINE_LM_CONFIGS,
+    make_online_lm_configs,
     make_block_causal_mask,
+    parse_args,
 )
 
 
@@ -30,14 +32,23 @@ class _Cache:
         self.layers = [_Layer(length) for length in lengths]
 
 
-def test_online_lm_protocol_constants_and_configurations_are_unchanged() -> None:
+def test_online_lm_cli_defaults_to_compressing_every_layer() -> None:
+    assert parse_args([]).skip_layers == ()
+    assert parse_args(["--skip-layers"]).skip_layers == []
+    assert tuple(parse_args(["--skip-layers", "0", "1"]).skip_layers) == (0, 1)
+
+
+def test_online_lm_protocol_constants_and_default_configurations() -> None:
+    configs = make_online_lm_configs(())
+
     assert (NUM_TOKENS, MAX_CACHE_TOKENS, BLOCK_SIZE, CHECKPOINT_EVERY) == (
         8192,
         2000,
         32,
         512,
     )
-    assert [config["config"] for config in ONLINE_LM_CONFIGS] == [
+    assert configs == ONLINE_LM_CONFIGS
+    assert [config["config"] for config in configs] == [
         "no_compression",
         "low_l2",
         "keydiff",
@@ -45,13 +56,26 @@ def test_online_lm_protocol_constants_and_configurations_are_unchanged() -> None
         "high_l2",
         "snapkv",
     ]
-    assert [config["skip_layers"] for config in ONLINE_LM_CONFIGS] == [
+    assert [config["skip_layers"] for config in configs] == [
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+    ]
+
+
+def test_online_lm_explicit_skip_layers_apply_to_every_compressed_method() -> None:
+    configs = make_online_lm_configs((0, 1))
+
+    assert [config["skip_layers"] for config in configs] == [
         (),
         (0, 1),
         (0, 1),
         (0, 1),
         (0, 1),
-        (),
+        (0, 1),
     ]
 
 
@@ -81,6 +105,19 @@ def test_block_causal_mask_uses_the_physical_prefix_length(
     )
 
 
+def test_l2_online_budget_compresses_every_layer_without_skips() -> None:
+    cache = _Cache(2032, 2032, 2032, 2032)
+
+    compress_cache_to_budget(
+        cache,
+        max_cache_tokens=2000,
+        strategy="low_l2",
+        skip_layers=(),
+    )
+
+    assert cache_layer_lengths(cache) == [2000, 2000, 2000, 2000]
+
+
 def test_l2_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
     cache = _Cache(2032, 2032, 2032, 2032)
 
@@ -98,6 +135,18 @@ def test_l2_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
             layer.values - layer.keys,
             torch.full_like(layer.keys, 100),
         )
+
+
+def test_keydiff_online_budget_compresses_every_layer_without_skips() -> None:
+    cache = _Cache(2032, 2032, 2032, 2032)
+
+    compress_keydiff_cache_to_budget(
+        cache,
+        max_cache_tokens=2000,
+        skip_layers=(),
+    )
+
+    assert cache_layer_lengths(cache) == [2000, 2000, 2000, 2000]
 
 
 def test_keydiff_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
@@ -154,6 +203,48 @@ def test_snapkv_online_budget_preserves_the_complete_observation_window() -> Non
             layer.values - layer.keys,
             torch.full_like(layer.keys, 100),
         )
+
+
+def test_snapkv_online_budget_keeps_skipped_layers_uncompressed() -> None:
+    cache = _Cache(2032, 2032, 2032, 2032)
+    skipped_tensors = [
+        (cache.layers[layer_idx].keys, cache.layers[layer_idx].values)
+        for layer_idx in (0, 1)
+    ]
+    active_observations = [
+        (
+            cache.layers[layer_idx].keys[..., -32:, :].clone(),
+            cache.layers[layer_idx].values[..., -32:, :].clone(),
+        )
+        for layer_idx in (2, 3)
+    ]
+    active_scores = torch.arange(2000, dtype=torch.float32).reshape(
+        1, 1, 2000
+    )
+
+    compress_snapkv_cache(
+        cache,
+        scores_by_layer=(None, None, active_scores, active_scores),
+        target_capacity=2000,
+        observation_window_size=32,
+        pooling_kernel_size=5,
+        pooling_mode="max",
+        skip_layers=(0, 1),
+    )
+
+    assert cache_layer_lengths(cache) == [2032, 2032, 2000, 2000]
+    for layer_idx, (original_keys, original_values) in zip(
+        (0, 1), skipped_tensors, strict=True
+    ):
+        assert cache.layers[layer_idx].keys is original_keys
+        assert cache.layers[layer_idx].values is original_values
+    for layer_idx, (observation_keys, observation_values) in zip(
+        (2, 3), active_observations, strict=True
+    ):
+        layer = cache.layers[layer_idx]
+        assert layer.keys.shape == layer.values.shape
+        assert torch.equal(layer.keys[..., -32:, :], observation_keys)
+        assert torch.equal(layer.values[..., -32:, :], observation_values)
 
 
 def test_logical_positions_do_not_follow_compressed_cache_length() -> None:

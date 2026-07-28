@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import math
 import sys
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 import torch
@@ -50,29 +51,49 @@ SEED = 0
 DTYPE = "auto"
 ATTN_IMPLEMENTATION = "eager"
 
-L2_SKIP_LAYERS = (0, 1)
-KEYDIFF_SKIP_LAYERS = L2_SKIP_LAYERS
-SNAPKV_SKIP_LAYERS: tuple[int, ...] = ()
+DEFAULT_SKIP_LAYERS: tuple[int, ...] = ()
 OBSERVATION_WINDOW_SIZE = 32
 POOLING_KERNEL_SIZE = 5
 POOLING_MODE = "max"
 
-ONLINE_LM_CONFIGS = (
-    {"config": "no_compression", "strategy": "none", "skip_layers": ()},
-    {"config": "low_l2", "strategy": "low_l2", "skip_layers": L2_SKIP_LAYERS},
-    {
-        "config": "keydiff",
-        "strategy": "keydiff",
-        "skip_layers": KEYDIFF_SKIP_LAYERS,
-    },
-    {"config": "random", "strategy": "random", "skip_layers": L2_SKIP_LAYERS},
-    {"config": "high_l2", "strategy": "high_l2", "skip_layers": L2_SKIP_LAYERS},
-    {
-        "config": "snapkv",
-        "strategy": "snapkv",
-        "skip_layers": SNAPKV_SKIP_LAYERS,
-    },
-)
+
+def make_online_lm_configs(
+    skip_layers: Sequence[int],
+) -> tuple[dict[str, Any], ...]:
+    """Build the benchmark matrix with one shared runtime skip-layer policy."""
+
+    runtime_skip_layers = tuple(skip_layers)
+    return (
+        {"config": "no_compression", "strategy": "none", "skip_layers": ()},
+        {
+            "config": "low_l2",
+            "strategy": "low_l2",
+            "skip_layers": runtime_skip_layers,
+        },
+        {
+            "config": "keydiff",
+            "strategy": "keydiff",
+            "skip_layers": runtime_skip_layers,
+        },
+        {
+            "config": "random",
+            "strategy": "random",
+            "skip_layers": runtime_skip_layers,
+        },
+        {
+            "config": "high_l2",
+            "strategy": "high_l2",
+            "skip_layers": runtime_skip_layers,
+        },
+        {
+            "config": "snapkv",
+            "strategy": "snapkv",
+            "skip_layers": runtime_skip_layers,
+        },
+    )
+
+
+ONLINE_LM_CONFIGS = make_online_lm_configs(DEFAULT_SKIP_LAYERS)
 
 CURVE_COLUMNS = [
     "model_name",
@@ -100,6 +121,23 @@ SUMMARY_COLUMNS = [
     "final_memory_saved_percent",
     "elapsed_seconds",
 ]
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark online language modelling with bounded KV caches."
+    )
+    parser.add_argument(
+        "--skip-layers",
+        type=int,
+        nargs="*",
+        default=DEFAULT_SKIP_LAYERS,
+        help=(
+            "Layer indices to leave uncompressed for every compression strategy "
+            "(default: compress every layer)."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 def load_token_sequence(tokenizer: Any, num_tokens: int = NUM_TOKENS) -> torch.Tensor:
@@ -191,10 +229,17 @@ def evaluate_config(
         labels = input_tokens[:, start + 1 : end + 1]
         block_length = int(block_ids.shape[1])
         previous_lengths = cache_layer_lengths(cache) if cache is not None else []
-        previous_cache_length = previous_lengths[0] if previous_lengths else 0
+        active_previous_lengths = [
+            length
+            for layer_idx, length in enumerate(previous_lengths)
+            if layer_idx not in skip_layers
+        ]
         collect_snapkv_scores = (
             strategy == "snapkv"
-            and previous_cache_length + block_length > MAX_CACHE_TOKENS
+            and any(
+                length + block_length > MAX_CACHE_TOKENS
+                for length in active_previous_lengths
+            )
         )
         position_ids = make_position_ids(
             logical_position,
@@ -207,14 +252,20 @@ def evaluate_config(
         if previous_lengths and any(
             length != logical_position for length in previous_lengths
         ):
-            if strategy == "snapkv":
+            if strategy == "snapkv" and len(set(previous_lengths)) == 1:
                 attention_mask = make_block_causal_mask(
-                    previous_cache_length,
+                    previous_lengths[0],
                     block_length,
                     dtype=model_dtype,
                     device=device,
                 )
-            elif strategy in {"low_l2", "keydiff", "random", "high_l2"}:
+            elif strategy in {
+                "low_l2",
+                "keydiff",
+                "random",
+                "high_l2",
+                "snapkv",
+            }:
                 decoder_layers = model.model.layers
                 if len(decoder_layers) != len(previous_lengths):
                     raise AssertionError(
@@ -322,8 +373,9 @@ def evaluate_config(
             if collect_snapkv_scores:
                 if outputs.attentions is None:
                     raise AssertionError("SnapKV compression requires attentions")
-                observation_snapshots = [
-                    (
+                num_layers = len(outputs.attentions)
+                observation_snapshots = {
+                    layer_idx: (
                         get_cache_layer(cache, layer_idx)[0][
                             ..., -OBSERVATION_WINDOW_SIZE:, :
                         ].clone(),
@@ -331,8 +383,14 @@ def evaluate_config(
                             ..., -OBSERVATION_WINDOW_SIZE:, :
                         ].clone(),
                     )
-                    for layer_idx in range(len(outputs.attentions))
-                ]
+                    for layer_idx in range(num_layers)
+                    if layer_idx not in skip_layers
+                }
+                skipped_layer_tensors = {
+                    layer_idx: get_cache_layer(cache, layer_idx)
+                    for layer_idx in range(num_layers)
+                    if layer_idx in skip_layers
+                }
                 scores_by_layer = scores_from_block_attentions(
                     outputs.attentions,
                     num_key_value_heads=num_key_value_heads,
@@ -350,38 +408,59 @@ def evaluate_config(
                     pooling_mode=POOLING_MODE,
                     skip_layers=skip_layers,
                 )
-                for layer_idx, (expected_keys, expected_values) in enumerate(
-                    observation_snapshots
-                ):
+                for layer_idx in range(num_layers):
                     keys, values = get_cache_layer(cache, layer_idx)
                     if keys.shape != values.shape:
                         raise AssertionError(
                             f"SnapKV layer {layer_idx} K/V shapes differ"
                         )
-                    if int(keys.shape[2]) != MAX_CACHE_TOKENS:
+                    expected_length = (
+                        logical_position
+                        if layer_idx in skip_layers
+                        else MAX_CACHE_TOKENS
+                    )
+                    if int(keys.shape[2]) != expected_length:
                         raise AssertionError(
                             f"SnapKV layer {layer_idx} has {keys.shape[2]} "
-                            f"tokens, expected {MAX_CACHE_TOKENS}"
+                            f"tokens, expected {expected_length}"
                         )
-                    if not torch.equal(
-                        keys[..., -OBSERVATION_WINDOW_SIZE:, :],
-                        expected_keys,
-                    ) or not torch.equal(
-                        values[..., -OBSERVATION_WINDOW_SIZE:, :],
-                        expected_values,
-                    ):
+                    if layer_idx in skip_layers:
+                        previous_keys, previous_values = skipped_layer_tensors[
+                            layer_idx
+                        ]
+                        if keys is not previous_keys or values is not previous_values:
+                            raise AssertionError(
+                                f"SnapKV compressed skipped layer {layer_idx}"
+                            )
+                        continue
+                    expected_keys, expected_values = observation_snapshots[layer_idx]
+                    keys_preserved = torch.equal(
+                        keys[..., -OBSERVATION_WINDOW_SIZE:, :], expected_keys
+                    )
+                    values_preserved = torch.equal(
+                        values[..., -OBSERVATION_WINDOW_SIZE:, :], expected_values
+                    )
+                    if not keys_preserved or not values_preserved:
                         raise AssertionError(
                             f"SnapKV layer {layer_idx} changed the observation "
                             "window"
                         )
                 del observation_snapshots
+                del skipped_layer_tensors
                 del scores_by_layer
             else:
                 lengths = cache_layer_lengths(cache)
-                if any(length != logical_position for length in lengths):
-                    raise AssertionError(
-                        "SnapKV compressed before the KV budget was exceeded"
+                for layer_idx, length in enumerate(lengths):
+                    expected = (
+                        logical_position
+                        if layer_idx in skip_layers
+                        else min(logical_position, MAX_CACHE_TOKENS)
                     )
+                    if length != expected:
+                        raise AssertionError(
+                            f"SnapKV layer {layer_idx} has {length} tokens, "
+                            f"expected {expected}"
+                        )
         else:
             lengths = cache_layer_lengths(cache)
             if any(length != logical_position for length in lengths):
@@ -458,7 +537,9 @@ def evaluate_config(
     return curve_rows, summary
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    online_lm_configs = make_online_lm_configs(args.skip_layers)
     results_dir = PROJECT_ROOT / "results"
     results_dir.mkdir(exist_ok=True)
     curve_path = results_dir / "online_lm_curve.csv"
@@ -480,8 +561,8 @@ def main() -> None:
         seed=SEED,
         lengths=[NUM_TOKENS],
         depths=None,
-        configurations=ONLINE_LM_CONFIGS,
-        skip_layers=(),
+        configurations=online_lm_configs,
+        skip_layers=args.skip_layers,
         extra={
             "dataset_name": DATASET_NAME,
             "dataset_config": DATASET_CONFIG,
@@ -490,14 +571,11 @@ def main() -> None:
             "max_cache_tokens": MAX_CACHE_TOKENS,
             "block_size": BLOCK_SIZE,
             "checkpoint_every": CHECKPOINT_EVERY,
-            "l2_skip_layers": L2_SKIP_LAYERS,
-            "keydiff_skip_layers": KEYDIFF_SKIP_LAYERS,
             "snapkv": {
                 "target_cache_tokens": MAX_CACHE_TOKENS,
                 "observation_window_size": OBSERVATION_WINDOW_SIZE,
                 "pooling_kernel_size": POOLING_KERNEL_SIZE,
                 "pooling_mode": POOLING_MODE,
-                "skip_layers": SNAPKV_SKIP_LAYERS,
             },
         },
     )
@@ -512,7 +590,7 @@ def main() -> None:
 
     curve_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
-    for config in ONLINE_LM_CONFIGS:
+    for config in online_lm_configs:
         config_curve, config_summary = evaluate_config(model, token_ids, config)
         curve_rows.extend(config_curve)
         summary_rows.append(config_summary)
