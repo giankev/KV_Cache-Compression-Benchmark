@@ -35,8 +35,7 @@ CONTEXT_LENGTHS = (8192,)
 SEEDS = (0, 1, 2)
 KEEP_RATIO = 0.10
 
-# Keep the first two layers intact to match the project comparison protocol.
-SKIP_LAYERS = (0, 1)
+SKIP_LAYERS: tuple[int, ...] = ()
 CHUNK_SIZE = 512
 OUTPUT_PREFIX = "l2_passkey_3b_8k_keep10"
 DTYPE = "auto"

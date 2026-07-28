@@ -36,8 +36,7 @@ CONTEXT_LENGTHS = (8192,)
 SEEDS = (0, 1, 2)
 KEEP_RATIO = 0.10
 
-# Match the controlled L2 comparison by preserving the first two layers.
-SKIP_LAYERS = (0, 1)
+SKIP_LAYERS: tuple[int, ...] = ()
 CHUNK_SIZE = 512
 OUTPUT_PREFIX = "keydiff_passkey_3b_8k_keep10"
 DTYPE = "auto"

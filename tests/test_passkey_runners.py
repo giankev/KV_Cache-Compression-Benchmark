@@ -58,7 +58,7 @@ def test_runner_defaults_and_configuration_sets() -> None:
     assert l2_args.seeds == (0, 1, 2)
     assert l2_args.keep_ratio == 0.10
     assert run_l2_passkey.KEEP_RATIO == 0.10
-    assert l2_args.skip_layers == (0, 1)
+    assert l2_args.skip_layers == ()
     assert [config for config, _ in run_l2_passkey.CONFIGURATIONS] == [
         "no_compression",
         "low_l2",
@@ -69,7 +69,7 @@ def test_runner_defaults_and_configuration_sets() -> None:
     assert keydiff_args.context_lengths == (8192,)
     assert keydiff_args.seeds == (0, 1, 2)
     assert keydiff_args.keep_ratio == 0.10
-    assert keydiff_args.skip_layers == (0, 1)
+    assert keydiff_args.skip_layers == ()
     assert [config for config, _ in run_keydiff_passkey.CONFIGURATIONS] == [
         "no_compression",
         "keydiff",
@@ -79,7 +79,68 @@ def test_runner_defaults_and_configuration_sets() -> None:
     assert snapkv_args.observation_window_size == 32
     assert snapkv_args.target_cache_tokens == 1024
     assert run_snapkv_passkey.SKIP_LAYERS == ()
-    assert not hasattr(snapkv_args, "skip_layers")
+    assert snapkv_args.skip_layers == ()
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [run_l2_passkey, run_keydiff_passkey, run_snapkv_passkey],
+)
+def test_skip_layers_cli_is_explicit_for_every_passkey_runner(runner: Any) -> None:
+    assert runner.parse_args([]).skip_layers == ()
+    assert runner.parse_args(["--skip-layers"]).skip_layers == []
+    assert runner.parse_args(["--skip-layers", "0", "1"]).skip_layers == [0, 1]
+    assert runner.parse_args(
+        ["--skip-layers", "0", "1", "2"]
+    ).skip_layers == [0, 1, 2]
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [run_l2_passkey, run_keydiff_passkey, run_snapkv_passkey],
+)
+@pytest.mark.parametrize(
+    ("skip_cli", "expected_skip_layers"),
+    [
+        ([], ()),
+        (["--skip-layers", "0", "1"], (0, 1)),
+    ],
+)
+def test_metadata_records_runtime_skip_layers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    runner: Any,
+    skip_cli: list[str],
+    expected_skip_layers: tuple[int, ...],
+) -> None:
+    recorded_skip_layers: list[tuple[int, ...]] = []
+
+    class _Frame:
+        def to_csv(self, *_: Any, **__: Any) -> None:
+            pass
+
+    def fake_metadata(**kwargs: Any) -> dict[str, Any]:
+        recorded_skip_layers.append(tuple(kwargs["skip_layers"]))
+        return {}
+
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "load_model_and_tokenizer",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(runner, "make_run_metadata", fake_metadata)
+    monkeypatch.setattr(runner, "print_run_metadata", lambda _: None)
+    monkeypatch.setattr(runner, "save_run_metadata", lambda *_: None)
+    monkeypatch.setattr(runner, "run_benchmark", lambda *_: _Frame())
+    monkeypatch.setattr(runner, "summarize_results", lambda _: _Frame())
+    monkeypatch.setattr(runner, "print_summary", lambda _: None)
+
+    runner.main(
+        ["--context-lengths", "128", "--seeds", "7", *skip_cli]
+    )
+
+    assert recorded_skip_layers == [expected_skip_layers]
 
 
 def test_l2_keep_ratio_is_configurable_from_the_cli() -> None:
@@ -94,9 +155,18 @@ def test_l2_keep_ratio_must_be_in_range(keep_ratio: str) -> None:
         run_l2_passkey.parse_args(["--keep-ratio", keep_ratio])
 
 
-def test_l2_runner_uses_requested_ratio_for_compressed_configs(
+@pytest.mark.parametrize(
+    ("skip_cli", "expected_skip_layers"),
+    [
+        ([], ()),
+        (["--skip-layers", "0", "1"], (0, 1)),
+    ],
+)
+def test_l2_runner_uses_requested_runtime_configuration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
+    skip_cli: list[str],
+    expected_skip_layers: tuple[int, ...],
 ) -> None:
     calls: list[dict[str, Any]] = []
     args = run_l2_passkey.parse_args(
@@ -107,6 +177,7 @@ def test_l2_runner_uses_requested_ratio_for_compressed_configs(
             "7",
             "--keep-ratio",
             "0.25",
+            *skip_cli,
         ]
     )
     monkeypatch.setattr(
@@ -140,7 +211,9 @@ def test_l2_runner_uses_requested_ratio_for_compressed_configs(
         "high_l2",
     ]
     assert [call["keep_ratio"] for call in calls] == [1.0, 0.25, 0.25, 0.25]
-    assert all(call["skip_layers"] == (0, 1) for call in calls)
+    assert all(
+        tuple(call["skip_layers"]) == expected_skip_layers for call in calls
+    )
 
 
 def test_l2_baseline_failure_skips_compressed_configs(
@@ -184,13 +257,22 @@ def test_l2_baseline_failure_skips_compressed_configs(
     assert len(rows) == 1
 
 
-def test_snapkv_runner_compresses_every_layer(
+@pytest.mark.parametrize(
+    ("skip_cli", "expected_skip_layers"),
+    [
+        ([], ()),
+        (["--skip-layers", "0", "1"], (0, 1)),
+    ],
+)
+def test_snapkv_runner_forwards_runtime_skip_layers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
+    skip_cli: list[str],
+    expected_skip_layers: tuple[int, ...],
 ) -> None:
-    calls: list[tuple[str, tuple[int, ...]]] = []
+    calls: list[tuple[str, Any]] = []
     args = run_snapkv_passkey.parse_args(
-        ["--context-lengths", "128", "--seeds", "7"]
+        ["--context-lengths", "128", "--seeds", "7", *skip_cli]
     )
     monkeypatch.setattr(
         run_snapkv_passkey,
@@ -226,7 +308,10 @@ def test_snapkv_runner_compresses_every_layer(
         tmp_path / "raw.csv",
     )
 
-    assert calls == [("no_compression", ()), ("snapkv", ())]
+    assert [(config, tuple(skips)) for config, skips in calls] == [
+        ("no_compression", expected_skip_layers),
+        ("snapkv", expected_skip_layers),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -236,16 +321,25 @@ def test_snapkv_runner_compresses_every_layer(
         (False, ["no_compression"]),
     ],
 )
+@pytest.mark.parametrize(
+    ("skip_cli", "expected_skip_layers"),
+    [
+        ([], ()),
+        (["--skip-layers", "0", "1"], (0, 1)),
+    ],
+)
 def test_keydiff_runner_reuses_one_example_and_honors_baseline_gate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
     baseline_correct: bool,
     expected_configs: list[str],
+    skip_cli: list[str],
+    expected_skip_layers: tuple[int, ...],
 ) -> None:
     example = object()
-    calls: list[tuple[str, Any]] = []
+    calls: list[tuple[str, Any, tuple[int, ...]]] = []
     args = run_keydiff_passkey.parse_args(
-        ["--context-lengths", "128", "--seeds", "7"]
+        ["--context-lengths", "128", "--seeds", "7", *skip_cli]
     )
     monkeypatch.setattr(
         run_keydiff_passkey,
@@ -254,11 +348,19 @@ def test_keydiff_runner_reuses_one_example_and_honors_baseline_gate(
     )
 
     def fake_baseline(**kwargs: Any) -> dict[str, Any]:
-        calls.append(("no_compression", kwargs["example"]))
+        calls.append(
+            (
+                "no_compression",
+                kwargs["example"],
+                tuple(kwargs["skip_layers"]),
+            )
+        )
         return {"correct": baseline_correct}
 
     def fake_keydiff(**kwargs: Any) -> dict[str, Any]:
-        calls.append(("keydiff", kwargs["example"]))
+        calls.append(
+            ("keydiff", kwargs["example"], tuple(kwargs["skip_layers"]))
+        )
         return {"correct": True}
 
     monkeypatch.setattr(
@@ -281,5 +383,8 @@ def test_keydiff_runner_reuses_one_example_and_honors_baseline_gate(
         tmp_path / "raw.csv",
     )
 
-    assert [config for config, _ in calls] == expected_configs
-    assert all(call_example is example for _, call_example in calls)
+    assert [config for config, _, _ in calls] == expected_configs
+    assert all(call_example is example for _, call_example, _ in calls)
+    assert all(
+        skip_layers == expected_skip_layers for _, _, skip_layers in calls
+    )

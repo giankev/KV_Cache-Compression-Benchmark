@@ -38,7 +38,6 @@ TARGET_CACHE_TOKENS = 1024
 POOLING_KERNEL_SIZE = 5
 POOLING_MODE = "max"
 
-# SnapKV compresses every layer; only the L2 runner skips layers 0 and 1.
 SKIP_LAYERS: tuple[int, ...] = ()
 CHUNK_SIZE = 512
 OUTPUT_PREFIX = "snapkv_passkey_3b_8k"
@@ -78,6 +77,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("max", "avg", "mean"),
         default=POOLING_MODE,
     )
+    parser.add_argument(
+        "--skip-layers",
+        type=int,
+        nargs="*",
+        default=SKIP_LAYERS,
+    )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--output-prefix", default=OUTPUT_PREFIX)
     return parser.parse_args(argv)
@@ -106,7 +111,7 @@ def run_benchmark(
                 config="no_compression",
                 strategy="none",
                 keep_ratio=1.0,
-                skip_layers=SKIP_LAYERS,
+                skip_layers=args.skip_layers,
                 chunk_size=args.chunk_size,
                 method="snapkv",
                 observation_window_size=args.observation_window_size,
@@ -128,7 +133,7 @@ def run_benchmark(
                 observation_window_size=args.observation_window_size,
                 pooling_kernel_size=args.pooling_kernel_size,
                 pooling_mode=args.pooling_mode,
-                skip_layers=SKIP_LAYERS,
+                skip_layers=args.skip_layers,
                 chunk_size=args.chunk_size,
             )
             rows.append(row)
@@ -183,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "pooling_mode": args.pooling_mode,
             },
         ],
-        skip_layers=SKIP_LAYERS,
+        skip_layers=args.skip_layers,
         extra={
             "seeds": args.seeds,
             "chunk_size": args.chunk_size,

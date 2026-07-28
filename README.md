@@ -124,14 +124,18 @@ requested `--keep-ratio` (10% by default) for each non-skipped cache layer:
 The effective number can be lower because a failed baseline skips the three
 compressed configurations for that seed. The SnapKV runner evaluates only
 `no_compression` and `snapkv`, with a 32-token observation window and a
-1024-token target cache by default. L2 leaves layers 0 and 1 intact; SnapKV has
-no `--skip-layers` option and compresses every layer.
+1024-token target cache by default.
+
+All three passkey runners compress every layer by default. Use
+`--skip-layers` to explicitly list layers that must remain uncompressed; for
+example, `--skip-layers 0 1` reproduces the previous L2 comparison protocol.
+The selected runtime value is recorded in metadata and raw results.
 
 The KeyDiff runner evaluates `no_compression` and `keydiff` with the same
-ratio, seeds, and skipped layers as L2. It retains keys with low cosine
-similarity to an anchor obtained by averaging normalized cached keys. This
-implements only the KeyDiff scoring and eviction criterion, not the paper's
-full block-wise inference or BlockPress protocol.
+ratio and seeds as L2. KeyDiff does not intrinsically require skipped layers.
+It retains keys with low cosine similarity to an anchor obtained by averaging
+normalized cached keys. This implements only the KeyDiff scoring and eviction
+criterion, not the paper's full block-wise inference or BlockPress protocol.
 
 Each prompt is built once per context length and seed. The uncompressed
 baseline runs first. If it fails, that baseline row is saved and compressed
@@ -195,13 +199,14 @@ and immediately after optional compression, before answer generation.
 `memory_saved_mb` is their difference. `memory_saved_percent` is derived from
 those two full-cache measurements rather than from the nominal keep ratio.
 
-For L2, `keep_ratio` is the requested ratio (`1.0` for the baseline) and
-`target_cache_tokens` is the resulting capacity of each compressed layer;
-`skip_layers` is `[0, 1]`. Pooling fields are empty because L2 does not use
+For L2 and KeyDiff, `keep_ratio` is the requested ratio (`1.0` for the
+baseline) and `target_cache_tokens` is the resulting capacity of each
+compressed layer. Pooling fields are empty because these methods do not use
 pooling. For SnapKV, `keep_ratio` is the effective ratio
-`target_cache_tokens / context_length`, `skip_layers` is `[]`, and the target
-capacity, observation window, pooling kernel, and pooling mode are recorded
-explicitly. Because the two methods compress different layer sets, compare
+`target_cache_tokens / context_length`, and the target capacity, observation
+window, pooling kernel, and pooling mode are recorded explicitly.
+`skip_layers` always records the actual CLI selection and is empty by default
+for every passkey runner. When methods compress different layer sets, compare
 their real `memory_saved_percent`, not only their keep ratios.
 
 Torch and Transformers versions, dtype, device map, skip layers, seeds, and
