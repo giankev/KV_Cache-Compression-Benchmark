@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from l2kv.cache_metrics import cache_layer_lengths
+from l2kv.keydiff_compression import compress_keydiff_cache_to_budget
 from l2kv.l2_compression import compress_cache_to_budget
 from l2kv.position_utils import make_cache_position, make_position_ids
 from l2kv.snapkv_compression import compress_snapkv_cache
@@ -39,12 +40,14 @@ def test_online_lm_protocol_constants_and_configurations_are_unchanged() -> None
     assert [config["config"] for config in ONLINE_LM_CONFIGS] == [
         "no_compression",
         "low_l2",
+        "keydiff",
         "random",
         "high_l2",
         "snapkv",
     ]
     assert [config["skip_layers"] for config in ONLINE_LM_CONFIGS] == [
         (),
+        (0, 1),
         (0, 1),
         (0, 1),
         (0, 1),
@@ -85,6 +88,24 @@ def test_l2_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
         cache,
         max_cache_tokens=2000,
         strategy="low_l2",
+        skip_layers=(0, 1),
+    )
+
+    assert cache_layer_lengths(cache) == [2032, 2032, 2000, 2000]
+    for layer in cache.layers:
+        assert layer.keys.shape == layer.values.shape
+        assert torch.equal(
+            layer.values - layer.keys,
+            torch.full_like(layer.keys, 100),
+        )
+
+
+def test_keydiff_online_budget_keeps_layers_zero_and_one_uncompressed() -> None:
+    cache = _Cache(2032, 2032, 2032, 2032)
+
+    compress_keydiff_cache_to_budget(
+        cache,
+        max_cache_tokens=2000,
         skip_layers=(0, 1),
     )
 

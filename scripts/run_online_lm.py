@@ -21,6 +21,7 @@ from l2kv.cache_metrics import (
     kv_cache_size_mb,
     theoretical_kv_cache_size_mb,
 )
+from l2kv.keydiff_compression import compress_keydiff_cache_to_budget
 from l2kv.l2_compression import compress_cache_to_budget
 from l2kv.model_utils import get_model_config, load_model_and_tokenizer
 from l2kv.position_utils import make_cache_position, make_position_ids
@@ -50,6 +51,7 @@ DTYPE = "auto"
 ATTN_IMPLEMENTATION = "eager"
 
 L2_SKIP_LAYERS = (0, 1)
+KEYDIFF_SKIP_LAYERS = L2_SKIP_LAYERS
 SNAPKV_SKIP_LAYERS: tuple[int, ...] = ()
 OBSERVATION_WINDOW_SIZE = 32
 POOLING_KERNEL_SIZE = 5
@@ -58,6 +60,11 @@ POOLING_MODE = "max"
 ONLINE_LM_CONFIGS = (
     {"config": "no_compression", "strategy": "none", "skip_layers": ()},
     {"config": "low_l2", "strategy": "low_l2", "skip_layers": L2_SKIP_LAYERS},
+    {
+        "config": "keydiff",
+        "strategy": "keydiff",
+        "skip_layers": KEYDIFF_SKIP_LAYERS,
+    },
     {"config": "random", "strategy": "random", "skip_layers": L2_SKIP_LAYERS},
     {"config": "high_l2", "strategy": "high_l2", "skip_layers": L2_SKIP_LAYERS},
     {
@@ -207,7 +214,7 @@ def evaluate_config(
                     dtype=model_dtype,
                     device=device,
                 )
-            elif strategy in {"low_l2", "random", "high_l2"}:
+            elif strategy in {"low_l2", "keydiff", "random", "high_l2"}:
                 decoder_layers = model.model.layers
                 if len(decoder_layers) != len(previous_lengths):
                     raise AssertionError(
@@ -273,6 +280,30 @@ def evaluate_config(
                     cache,
                     max_cache_tokens=MAX_CACHE_TOKENS,
                     strategy=strategy,
+                    skip_layers=skip_layers,
+                )
+            lengths = cache_layer_lengths(cache)
+            for layer_idx, length in enumerate(lengths):
+                expected = (
+                    logical_position
+                    if layer_idx in skip_layers
+                    else min(logical_position, MAX_CACHE_TOKENS)
+                )
+                if length != expected:
+                    raise AssertionError(
+                        f"{config_name} layer {layer_idx} has {length} tokens, "
+                        f"expected {expected}"
+                    )
+        elif strategy == "keydiff":
+            active_lengths = [
+                length
+                for layer_idx, length in enumerate(cache_layer_lengths(cache))
+                if layer_idx not in skip_layers
+            ]
+            if any(length > MAX_CACHE_TOKENS for length in active_lengths):
+                cache = compress_keydiff_cache_to_budget(
+                    cache,
+                    max_cache_tokens=MAX_CACHE_TOKENS,
                     skip_layers=skip_layers,
                 )
             lengths = cache_layer_lengths(cache)
@@ -460,6 +491,7 @@ def main() -> None:
             "block_size": BLOCK_SIZE,
             "checkpoint_every": CHECKPOINT_EVERY,
             "l2_skip_layers": L2_SKIP_LAYERS,
+            "keydiff_skip_layers": KEYDIFF_SKIP_LAYERS,
             "snapkv": {
                 "target_cache_tokens": MAX_CACHE_TOKENS,
                 "observation_window_size": OBSERVATION_WINDOW_SIZE,

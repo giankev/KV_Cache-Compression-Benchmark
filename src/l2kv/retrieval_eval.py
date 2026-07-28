@@ -14,6 +14,7 @@ import pandas as pd
 import torch
 
 from .cache_metrics import cache_layer_lengths, kv_cache_size_mb
+from .keydiff_compression import compress_keydiff_cache_to_budget
 from .l2_compression import compress_cache_to_budget
 from .passkey import PasskeyExample
 from .position_utils import make_cache_position, make_position_ids
@@ -365,6 +366,83 @@ def evaluate_plain_or_l2(
         observation_window_size=observation_window_size,
         pooling_kernel_size=pooling_kernel_size,
         pooling_mode=pooling_mode,
+        skip_layers=skip_layers,
+        cache_before_mb=cache_before_mb,
+        cache_after_mb=cache_after_mb,
+        memory_saved_mb=memory_saved_mb,
+        memory_saved_percent=memory_saved_percent,
+        elapsed_seconds=elapsed_seconds,
+        generated_ids=generated_ids,
+        prediction=prediction,
+    )
+
+
+@torch.inference_mode()
+def evaluate_keydiff(
+    *,
+    model: Any,
+    tokenizer: Any,
+    model_name: str,
+    example: PasskeyExample,
+    keep_ratio: float,
+    skip_layers: Sequence[int],
+    chunk_size: int,
+) -> dict[str, Any]:
+    """Evaluate KeyDiff after a full logical-position-preserving prefill."""
+
+    devices = cuda_devices(model)
+    synchronize_cuda_devices(devices)
+    started = perf_counter()
+    cache, last_logits, logical_position = prefill_plain(
+        model,
+        example.prompt_ids,
+        chunk_size,
+    )
+    if logical_position != example.context_length:
+        raise AssertionError("Logical position after prefill must equal prompt length")
+
+    cache_before_mb = kv_cache_size_mb(cache)
+    capacity = target_capacity(example.context_length, keep_ratio)
+    cache = compress_keydiff_cache_to_budget(
+        cache,
+        max_cache_tokens=capacity,
+        skip_layers=skip_layers,
+    )
+    cache_after_mb = kv_cache_size_mb(cache)
+    assert_cache_capacity(
+        cache,
+        example.context_length,
+        capacity,
+        skip_layers,
+        compressed=True,
+    )
+    memory_saved_mb, memory_saved_percent = cache_memory_savings(
+        cache_before_mb,
+        cache_after_mb,
+    )
+
+    generated_ids, prediction, _, cache = generate_exact_answer(
+        model,
+        tokenizer,
+        cache,
+        last_logits,
+        logical_position,
+        example.answer_ids,
+    )
+    synchronize_cuda_devices(devices)
+    elapsed_seconds = perf_counter() - started
+    del cache
+    del last_logits
+    return _finish_result(
+        model_name=model_name,
+        method="keydiff",
+        config="keydiff",
+        example=example,
+        keep_ratio=keep_ratio,
+        target_cache_tokens=capacity,
+        observation_window_size=None,
+        pooling_kernel_size=None,
+        pooling_mode=None,
         skip_layers=skip_layers,
         cache_before_mb=cache_before_mb,
         cache_after_mb=cache_after_mb,

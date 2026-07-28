@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from scripts import run_l2_passkey, run_snapkv_passkey
+from scripts import run_keydiff_passkey, run_l2_passkey, run_snapkv_passkey
 
 
 class _Encoding:
@@ -30,9 +30,10 @@ class _Tokenizer:
         return _Encoding(ids)
 
 
-def test_l2_and_snapkv_build_identical_prompts() -> None:
+def test_all_passkey_runners_build_identical_prompts() -> None:
     tokenizer = _Tokenizer()
     l2_example = run_l2_passkey.make_passkey_example(tokenizer, 128, 4)
+    keydiff_example = run_keydiff_passkey.make_passkey_example(tokenizer, 128, 4)
     snapkv_example = run_snapkv_passkey.make_passkey_example(
         tokenizer,
         128,
@@ -41,12 +42,16 @@ def test_l2_and_snapkv_build_identical_prompts() -> None:
     )
 
     assert l2_example.prompt_ids == snapkv_example.prompt_ids
+    assert l2_example.prompt_ids == keydiff_example.prompt_ids
     assert l2_example.answer_ids == snapkv_example.answer_ids
+    assert l2_example.answer_ids == keydiff_example.answer_ids
     assert l2_example.actual_depth == snapkv_example.actual_depth
+    assert l2_example.actual_depth == keydiff_example.actual_depth
 
 
 def test_runner_defaults_and_configuration_sets() -> None:
     l2_args = run_l2_passkey.parse_args([])
+    keydiff_args = run_keydiff_passkey.parse_args([])
     snapkv_args = run_snapkv_passkey.parse_args([])
 
     assert l2_args.context_lengths == (8192,)
@@ -61,6 +66,14 @@ def test_runner_defaults_and_configuration_sets() -> None:
         "high_l2",
     ]
     assert len(l2_args.seeds) * len(run_l2_passkey.CONFIGURATIONS) == 12
+    assert keydiff_args.context_lengths == (8192,)
+    assert keydiff_args.seeds == (0, 1, 2)
+    assert keydiff_args.keep_ratio == 0.10
+    assert keydiff_args.skip_layers == (0, 1)
+    assert [config for config, _ in run_keydiff_passkey.CONFIGURATIONS] == [
+        "no_compression",
+        "keydiff",
+    ]
     assert snapkv_args.context_lengths == (8192,)
     assert snapkv_args.seeds == tuple(range(10))
     assert snapkv_args.observation_window_size == 32
@@ -214,3 +227,59 @@ def test_snapkv_runner_compresses_every_layer(
     )
 
     assert calls == [("no_compression", ()), ("snapkv", ())]
+
+
+@pytest.mark.parametrize(
+    ("baseline_correct", "expected_configs"),
+    [
+        (True, ["no_compression", "keydiff"]),
+        (False, ["no_compression"]),
+    ],
+)
+def test_keydiff_runner_reuses_one_example_and_honors_baseline_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    baseline_correct: bool,
+    expected_configs: list[str],
+) -> None:
+    example = object()
+    calls: list[tuple[str, Any]] = []
+    args = run_keydiff_passkey.parse_args(
+        ["--context-lengths", "128", "--seeds", "7"]
+    )
+    monkeypatch.setattr(
+        run_keydiff_passkey,
+        "make_passkey_example",
+        lambda *_: example,
+    )
+
+    def fake_baseline(**kwargs: Any) -> dict[str, Any]:
+        calls.append(("no_compression", kwargs["example"]))
+        return {"correct": baseline_correct}
+
+    def fake_keydiff(**kwargs: Any) -> dict[str, Any]:
+        calls.append(("keydiff", kwargs["example"]))
+        return {"correct": True}
+
+    monkeypatch.setattr(
+        run_keydiff_passkey,
+        "evaluate_plain_or_l2",
+        fake_baseline,
+    )
+    monkeypatch.setattr(run_keydiff_passkey, "evaluate_keydiff", fake_keydiff)
+    monkeypatch.setattr(
+        run_keydiff_passkey,
+        "checkpoint_raw",
+        lambda rows, _: rows,
+    )
+    monkeypatch.setattr(run_keydiff_passkey, "print_result", lambda _: None)
+
+    run_keydiff_passkey.run_benchmark(
+        object(),
+        object(),
+        args,
+        tmp_path / "raw.csv",
+    )
+
+    assert [config for config, _ in calls] == expected_configs
+    assert all(call_example is example for _, call_example in calls)

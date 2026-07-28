@@ -5,10 +5,12 @@ Qwen2.5. It compares:
 
 - no compression;
 - low-L2, random, and high-L2 token selection;
+- KeyDiff key-similarity token selection;
 - SnapKV attention-based token selection.
 
-The L2 and SnapKV implementations are intentionally separate. The online
-language-modelling benchmark remains available in `scripts/run_online_lm.py`.
+The L2, KeyDiff, and SnapKV implementations are intentionally separate. The
+online language-modelling benchmark remains available in
+`scripts/run_online_lm.py`.
 
 ## Setup
 
@@ -90,6 +92,15 @@ python scripts/run_l2_passkey.py \
   --chunk-size 512 \
   --output-prefix l2_passkey_3b_8k_keep10
 
+python scripts/run_keydiff_passkey.py \
+  --model-name Qwen/Qwen2.5-3B-Instruct \
+  --context-lengths 8192 \
+  --seeds 0 1 2 \
+  --keep-ratio 0.10 \
+  --skip-layers 0 1 \
+  --chunk-size 512 \
+  --output-prefix keydiff_passkey_3b_8k_keep10
+
 python scripts/run_snapkv_passkey.py \
   --model-name Qwen/Qwen2.5-3B-Instruct \
   --context-lengths 8192 \
@@ -115,6 +126,12 @@ compressed configurations for that seed. The SnapKV runner evaluates only
 `no_compression` and `snapkv`, with a 32-token observation window and a
 1024-token target cache by default. L2 leaves layers 0 and 1 intact; SnapKV has
 no `--skip-layers` option and compresses every layer.
+
+The KeyDiff runner evaluates `no_compression` and `keydiff` with the same
+ratio, seeds, and skipped layers as L2. It retains keys with low cosine
+similarity to an anchor obtained by averaging normalized cached keys. This
+implements only the KeyDiff scoring and eviction criterion, not the paper's
+full block-wise inference or BlockPress protocol.
 
 Each prompt is built once per context length and seed. The uncompressed
 baseline runs first. If it fails, that baseline row is saved and compressed
@@ -228,8 +245,8 @@ models sharded by `device_map="auto"`.
 
 Online LM is a reduced reproduction inspired by the Wikipedia language
 modelling experiment in *A Simple and Effective L2 Norm-Based Strategy for KV
-Cache Compression*. It compares `low_l2`, `random`, `high_l2`, and `snapkv`
-against `no_compression` on:
+Cache Compression*. It compares `low_l2`, `keydiff`, `random`, `high_l2`, and
+`snapkv` against `no_compression` on:
 
 - one deterministic 8,192-token stream from the WikiText-2 test split;
 - a fixed maximum KV-cache capacity of 2,000 tokens;
@@ -246,8 +263,9 @@ python scripts/plot_online_lm.py
 
 The benchmark writes `results/online_lm_curve.csv`,
 `results/online_lm_summary.csv`, and `results/online_lm_metadata.json`. The plot
-defaults to `results/online_lm_log_ppl.png` and marks the 2,000-token KV budget.
-An optional accuracy plot can be produced with:
+defaults to `results/online_lm_log_ppl.png`, includes the KeyDiff curve
+automatically, and marks the 2,000-token KV budget. An optional accuracy plot
+can be produced with:
 
 ```bash
 python scripts/plot_online_lm.py \
@@ -265,10 +283,12 @@ protocol.
 - `src/l2kv/retrieval_eval.py`: shared prefill, compression evaluation, exact
   answer generation, cache measurement, checkpointing, and summaries.
 - `scripts/run_l2_passkey.py`: L2-only runner.
+- `scripts/run_keydiff_passkey.py`: baseline and KeyDiff runner.
 - `scripts/run_snapkv_passkey.py`: baseline and SnapKV runner.
 - `scripts/plot_retrieval.py`: generic accuracy-versus-context plot.
 - `scripts/plot_online_lm.py`: cumulative online LM log-PPL plot.
 - `src/l2kv/l2_compression.py`: low-L2, high-L2, and random cache policies.
+- `src/l2kv/keydiff_compression.py`: KeyDiff key-similarity cache policy.
 - `src/l2kv/snapkv_compression.py`: SnapKV scoring and cache rewrite.
 
 Implementation details are in

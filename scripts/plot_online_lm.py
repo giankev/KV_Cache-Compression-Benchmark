@@ -21,6 +21,7 @@ KV_BUDGET = 2000
 CONFIG_ORDER = (
     "no_compression",
     "low_l2",
+    "keydiff",
     "random",
     "high_l2",
     "snapkv",
