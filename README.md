@@ -15,6 +15,26 @@ Following Devoto et al., L2Compress scores cached keys by their L2 norm and
 retains low-L2 keys, which are treated as more important. The method does not
 require attention scores.
 
+#### L2 norm–attention correlation
+
+![ALR across Qwen2.5-3B-Instruct layers and heads](results/L2_ALR_PLOT.png)
+
+*Mean ALR across the 36 layers and 16 query heads of Qwen2.5-3B-Instruct.
+Lower values indicate stronger agreement between L2-norm-based and
+attention-based importance rankings.*
+
+To examine this relationship in Qwen2.5-3B-Instruct, we measure ALR across
+layers 0–35 and heads 0–15. Following the
+[L2Compress paper](https://arxiv.org/abs/2406.11430), ALR measures how far
+L2-norm-based eviction is from ideal attention-based eviction: lower ALR means
+stronger agreement, while higher ALR means that L2 norm is a weaker importance
+proxy. Most layer-head pairs have relatively low ALR, but the earliest layers
+contain some of the strongest high-ALR regions, with additional bands around
+layers 19–21 and 29. This supports the paper's qualitative observation that the
+relationship varies across layers and heads, although the exact Qwen pattern
+differs from the Llama results in the original work. Layer skipping therefore
+remains an optional experimental control rather than a requirement.
+
 ### KeyDiff
 
 KeyDiff, proposed by Park et al., measures redundancy through cosine similarity
