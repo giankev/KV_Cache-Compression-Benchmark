@@ -162,8 +162,7 @@ provides the Kaggle/notebook workflow used to reproduce the experiments.
 - `evaluation.ipynb` — Kaggle experiment workflow
 - `tests/` — regression and algorithm tests
 
-Implementation details and limitations are documented in
-[`docs/IMPLEMENTATION_NOTES.md`](docs/IMPLEMENTATION_NOTES.md) and
+Implementation details in
 [`docs/SNAPKV_NOTES.md`](docs/SNAPKV_NOTES.md).
 
 ## References
