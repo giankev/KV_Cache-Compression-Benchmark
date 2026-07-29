@@ -1,9 +1,7 @@
 # KV Cache Compression Benchmark
 
-This repository studies KV-cache compression for long-context inference with
-`Qwen/Qwen2.5-3B-Instruct`. It implements several token-eviction strategies
-while leaving the language model unchanged, with an emphasis on reproducible
-experiments that fit university and Kaggle hardware.
+This repository studies KV-cache compression for inference with
+`Qwen/Qwen2.5-3B-Instruct`. It implements three token-eviction strategies.
 
 The project evaluates whether compressed caches preserve information in
 passkey retrieval and how they affect perplexity, next-token accuracy, and
@@ -37,8 +35,7 @@ baselines.
 
 ## Benchmarks
 
-Experiments use `Qwen/Qwen2.5-3B-Instruct` to provide a reproducible reduced
-benchmark that can run on limited university or Kaggle hardware.
+Experiments use `Qwen/Qwen2.5-3B-Instruct`.
 
 ### Passkey retrieval
 
